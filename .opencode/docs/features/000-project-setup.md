@@ -8,7 +8,7 @@ Every section is mandatory; write "None" rather than leaving one out.
 This file is never deleted and never renumbered: 000 is always the scaffold.
 -->
 
-**Status:** draft
+**Status:** done
 **Author:** init-context skill, approved by luis
 **Date:** 2026-10-30
 **Architecture version:** commit none yet (the repository has no commits as of 2026-10-30)
@@ -686,28 +686,36 @@ command; never batch steps.
 
 The builder ticks these before reporting done.
 
-- [ ] `mise install` ran; `Cargo.lock` exists and is committed
-- [ ] Every file in §2 exists at the exact path written there
-- [ ] Every test in §4 exists with the exact name and passes (`cargo test`)
-- [ ] `cargo clippy --all-targets -- -D warnings` reports no errors
-- [ ] `cargo fmt --check` exits zero
-- [ ] `cargo build --release` exits zero and `target/release/udiff --version`
+- [x] `mise install` ran; `Cargo.lock` exists and is committed (present and
+      not gitignored — this run made no commits: the whole feature is one
+      uncommitted tree, per the implement-feature skill's no-commit rule)
+- [x] Every file in §2 exists at the exact path written there
+- [x] Every test in §4 exists with the exact name and passes (`cargo test`:
+      34 tests, 34 §4 names, 0 missing)
+- [x] `cargo clippy --all-targets -- -D warnings` reports no errors
+- [x] `cargo fmt --check` exits zero
+- [x] `cargo build --release` exits zero and `target/release/udiff --version`
       prints `udiff 0.1.0`
-- [ ] Every acceptance criterion in §1.4 is observably true (each proven by a
-      test in §4 or by the command named there)
-- [ ] `grep -rn "std::process\|Command::new" src/ | grep -v 'src/git.rs'`
-      returns nothing (architecture.md §5 rule 4)
-- [ ] `grep -rn "Color::Rgb\|Color::new\|#[0-9a-fA-F]\{6\}" src/ | grep -v 'src/ui/theme'`
+- [x] Every acceptance criterion in §1.4 is observably true (each proven by a
+      test in §4 or by the command named there; AC2/AC7/AC8/AC10/AC13 also
+      observed live in a real pty: three panels + `conflict 1 of 2`, `cmp`-clean
+      quit, `local: main` / `local: 63c7fd7` labels under `git mergetool` and
+      the 4-arg form, staged save + non-zero-exit stage failure, both palettes)
+- [x] `grep -rn "Command::new" src/ | grep -v 'src/git.rs'` returns nothing
+      (architecture.md §5 rule 4 — nothing else spawns a process; the
+      non-exec `std::process::ExitCode` and `std::process::id()` uses are
+      required by §2.2 and architecture.md §7)
+- [x] `grep -rn "Color::Rgb\|Color::new\|#[0-9a-fA-F]\{6\}" src/ | grep -v 'src/ui/theme'`
       returns nothing (architecture.md §5 rule 7)
-- [ ] `cargo tree --depth 1` lists no dependency besides `ratatui`
+- [x] `cargo tree --depth 1` lists no dependency besides `ratatui`
       (architecture.md §5 rule 1)
-- [ ] Manual on a real TTY: the TUI opens on a conflicted sample file with the
+- [x] Manual on a real TTY: the TUI opens on a conflicted sample file with the
       three panels and `conflict 1 of N`; `q` quits leaving the file
       byte-identical (`cmp` before/after) [AC7]
-- [ ] Manual in a real repository: `git mergetool` launches udiff, the headers
+- [x] Manual in a real repository: `git mergetool` launches udiff, the headers
       show the branch labels, `s` saves and stages, `git rebase --continue`
       proceeds [AC8, AC10]
-- [ ] `architecture.md` updated if any name, table or rule changed
+- [x] `architecture.md` updated if any name, table or rule changed
 
 ---
 
@@ -720,7 +728,14 @@ Small ones count — they are the cheapest signal for the next planner. Write
 
 | # | Plan section | Plan said | Built instead |
 | --- | --- | --- | --- |
-| D1 | | | |
+| D1 | §6 checklist, rule-4 grep | `grep -rn "std::process\|Command::new" src/ \| grep -v 'src/git.rs'` must return nothing | Narrowed to `grep -rn "Command::new" src/ \| grep -v 'src/git.rs'`; the broad pattern also matched `src/main.rs:7` (`std::process::ExitCode`, mandated by §2.2) and `src/app.rs:403` / `src/ui/theme/omarchy.rs:208` (`std::process::id()`, mandated by architecture.md §7 temp names), none of which spawn a process. User-approved 2026-10-31. |
+| D2 | §3 fixtures | `TYPED_MARKER_LINE` listed under `src/conflict.rs`, and app.rs to hold "the conflict fixtures above (local copies)" | `TYPED_MARKER_LINE` is declared only in `src/app.rs` (its only test lives there); app.rs copies only the three fixtures its tests use. An unused fixture constant is `dead_code` and fails `clippy -D warnings` (§2.12). |
+| D3 | §2.4 `OmarchyWatch` | `check` returns "Some only when the palette actually changed"; no fn listed for the initial theme load | `new()` observes no mtime, so the first `check()` is the initial load and returns `Some` (the shell uses it for the initial theme). architecture.md §4 forbids any module but `omarchy.rs` from reading theme files, and §2.2 lists no loader. |
+| D4 | §2.4/§2.10 `theme_dir` | Arrow chain "UDIFF_OMARCHY_DIR → ~/.local/state → ~/.config; each must contain colors.toml; else None" | Strict override: when `UDIFF_OMARCHY_DIR` is set, it must be a directory containing `colors.toml` or the built-in palette is used — the home probe runs only when the variable is unset. The only reading of AC13's "a theme directory … and one without → built-in" that holds on any machine. |
+| D5 | §2.2 `src/ui/theme/mod.rs` | `Role` enum listed with no accessor connecting it to `Theme` | Added `Theme::get(role) -> Color`; architecture.md §6 requires widgets to ask the theme for a role instead of naming colors, and an unconsumed `Role` is `dead_code`. |
+| D6 | §2.7 TUI screen | Layout and titles fixed, panel *content* unspecified | All three panels render the whole document (byte-exact text runs, every conflict, selected conflict highlighted and scrolled into view with 2 lines of context) — user story 3 requires seeing the non-conflict text around conflicts read-only, and AC3 requires the selected conflict to be shown. |
+| D7 | §6 status line | `saved and staged` listed as a status-line success message | §2.7's keymap makes `s` exit on success, so the status line cannot hold it; udiff prints `saved and staged` to stdout after the terminal is restored (stage failure prints `warning: resolved file saved but not staged` on stderr, per AC10). |
+| D8 | §2.4 `parse` error line | "reports the 1-based line number" without naming which line | The detection line: the `>>>>>>>` line for `MissingSeparator`, the opening `<<<<<<<` line for `MissingClose` (EOF has no line), the offending marker line for `MissingOpen`/`NestedOpen`. A second `=======` inside a conflict is remote-side content (save-time validation rejects it). |
 
 ---
 
@@ -739,17 +754,112 @@ diverged, so the next plan does not repeat it. Each drift has a cause:
 
 ```
 D1
-  Cause: {{one of the five}}
-  Evidence: {{file, line, and the failure or conflict that exposed it}}
-  Why the spec missed it: {{the specific assumption that was wrong}}
-  Fix applied: {{what was changed}}
-  Follow-up: {{none | update architecture.md §N | re-plan as NNN}}
+  Cause: infeasible
+  Evidence: §6 checklist vs src/main.rs:7 (`use std::process::ExitCode;`,
+    required by §2.2 `fn main() -> ExitCode`), src/app.rs:403 and
+    src/ui/theme/omarchy.rs:208 (`std::process::id()`, required by
+    architecture.md §7 `udiff-test-<pid>-<counter>`); the grep could never
+    return nothing without breaking one of those two requirements.
+  Why the spec missed it: the grep operationalised architecture.md §5 rule 4
+    ("nothing else ever execs") with the wider pattern `std::process`, which
+    also matches the non-exec std APIs the same doc mandates.
+  Fix applied: checklist grep narrowed to `Command::new` (user-approved
+    2026-10-31); `Command::new` occurs only in src/git.rs.
+  Follow-up: none — architecture.md §5 rule 4 needs no change; the rule text
+    is about exec, not the `std::process` path.
+
+D2
+  Cause: plan-gap
+  Evidence: §3 lists `TYPED_MARKER_LINE` under src/conflict.rs though only
+    src/app.rs's `typed_marker_line_is_rejected_on_save` uses it;
+    `cargo check --all-targets` warned "constant `MARKER_LABELS` is never
+    used" for the mirror-image copy in app.rs (clippy §2 lint is `-D warnings`).
+  Why the spec missed it: §3's "duplicated per module on purpose" assumes
+    every module uses every fixture; unused `const`s in `#[cfg(test)]` are
+    `dead_code` and fail the verify chain.
+  Fix applied: each fixture lives only in the module whose §4 tests use it.
+  Follow-up: none.
+
+D3
+  Cause: plan-gap
+  Evidence: §2.2's omarchy fn list is `theme_dir`, `parse_colors_toml`,
+    `OmarchyWatch::{new, check}` — there is no initial-theme loader, and
+    architecture.md §4 says only src/ui/theme/omarchy.rs reads theme files,
+    so the shell cannot load the first theme itself.
+  Why the spec missed it: `check` was specified as change-only, leaving the
+    first frame without a theme source.
+  Fix applied: `new()` records no mtime, so the first `check()` is the
+    initial observation and returns `Some(theme)`; later calls return `Some`
+    only on a real mtime/directory change (`check_returns_some_only_on_change`
+    pins all four transitions).
+  Follow-up: none.
+
+D4
+  Cause: plan-gap
+  Evidence: §2.4 theme_dir's chain vs §1.4 AC13 ("a theme directory via
+    UDIFF_OMARCHY_DIR and one without → colors.toml palette … built-in
+    palette") — with fall-through, an override pointing at a directory
+    without colors.toml would silently use the home theme, not built-in.
+  Why the spec missed it: the arrow chain reads both as candidate order and
+    as override semantics; AC13 only holds under strict override semantics
+    on machines with Omarchy installed.
+  Fix applied: `UDIFF_OMARCHY_DIR` set → that directory must contain
+    colors.toml or the built-in palette is used; home probes only when unset.
+  Follow-up: none.
+
+D5
+  Cause: plan-gap
+  Evidence: §2.2 lists `enum Role` (nine variants) and the private `Theme`
+    fields but no accessor; architecture.md §6: "A widget may not name a raw
+    color — it asks the `Theme` for a role."
+  Why the spec missed it: the struct listing shows the data, not the
+    read path; without one the `Role` variants are dead code under §2.12.
+  Fix applied: `Theme::get(role) -> Color` in src/ui/theme/mod.rs, used by
+    every widget in src/ui/mod.rs.
+  Follow-up: none — architecture.md §6 already states the rule it implements.
+
+D6
+  Cause: plan-gap
+  Evidence: §2.7 fixes layout, titles and the status line but never says
+    what the panel bodies contain; §1.3 story 3 requires "seeing the
+    non-conflict text around them read-only" and AC3 requires the selected
+    conflict to be visible in all three panels.
+  Why the spec missed it: the layout spec was written at the chrome level.
+  Fix applied: whole-document rendering per panel (text runs + every
+    conflict's side for that panel), selected conflict highlighted with
+    `Role::Selection`, scrolled to its start minus 2 context lines with the
+    edit caret kept in view.
+  Follow-up: none.
+
+D7
+  Cause: plan-gap
+  Evidence: §6 lists `saved and staged` as a status-line message while
+    §2.7's keymap says `s` "write + stage; exits 0 on success" — a message
+    drawn into a screen that is left immediately cannot be seen.
+  Why the spec missed it: the status table and the keymap were specified
+    independently.
+  Fix applied: on success the shell restores the terminal and prints the
+    app's `Message::Info("saved and staged")` to stdout; on stage failure it
+    prints `warning: resolved file saved but not staged` (AC10 exact) and
+    exits 1; the write always precedes staging.
+  Follow-up: none.
+
+D8
+  Cause: plan-gap
+  Evidence: §2.4 says parse errors report "the 1-based line number" but a
+    `MissingClose` is only detected at EOF, which has no line number.
+  Why the spec missed it: it named the field, not the semantics per kind.
+  Fix applied: the detection line (close-marker line for MissingSeparator,
+    opening-marker line for MissingClose, offending marker for
+    MissingOpen/NestedOpen); a later `=======` inside a conflict is
+    remote-side content, caught by `validate_save` instead.
+  Follow-up: none.
 ```
 
 Set `Status: done` only after §7 and §8 are filled and every §6 box is ticked.
 
 ---
 
-Status: draft
+Status: done
 Date: 2026-10-30
 Commit: none yet (no commits in the repository as of 2026-10-30)

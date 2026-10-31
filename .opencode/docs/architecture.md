@@ -27,21 +27,25 @@ Current state (what is built):
 | Toolchain pin (mise → Rust 1.99.1, edition 2024) | built |
 | Product definition (`README.md`) | built |
 | Crate skeleton (`Cargo.toml`, Hello-World `src/main.rs`) | built |
-| Conflict parsing (git marker grammar) | not started |
-| Three-panel TUI (remote / local / current) | not started |
-| Per-conflict resolution + current-panel editing | not started |
-| Save + stage (`git add`) | not started |
-| `git mergetool` entry (1-arg / 4-arg forms) | not started |
-| Branch labels (marker labels + HEAD resolution) | not started |
-| Theme layer (built-in palette + Omarchy follow) | not started |
-| Unit tests (`cargo test`) | not started |
+| Conflict parsing (git marker grammar) | built |
+| Three-panel TUI (remote / local / current) | built |
+| Per-conflict resolution + current-panel editing | built |
+| Save + stage (`git add`) | built |
+| `git mergetool` entry (1-arg / 4-arg forms) | built |
+| Branch labels (marker labels + HEAD resolution) | built |
+| Theme layer (built-in palette + Omarchy follow) | built |
+| Unit tests (`cargo test`) | built |
 
 Keep this table honest. A row flips to `built` in the same change that builds
 it, never before. When the product charges money, the table always carries a
 `Payments` row and an `Analytics events` row.
 
-Recon note (2026-10-30): the repository has no commits yet and `src/main.rs` is
-a Hello-World placeholder — every `not started` row is genuinely unbuilt code.
+Recon note (2026-10-30): the repository had no commits yet and `src/main.rs`
+was a Hello-World placeholder — every row above was genuinely unbuilt code.
+Build note (2026-10-31): `features/000-project-setup.md` built every unbuilt
+row above in one change — marker parsing, the three-panel TUI with per-conflict
+editing, save + stage, the `git mergetool` entry, branch labels, the theme
+layer and 34 unit tests — all verified with the commands in §2.
 
 ### 1.1 Monetization
 
@@ -153,8 +157,9 @@ where a thing lives.
   Rendering (`ui::render`) and key translation (`ui::translate_key`) live here;
   nothing else.
 - `Theme` / `Role` — the nine color roles every widget consumes
-  (`src/ui/theme/mod.rs`); sourced either from the active Omarchy theme
-  (`src/ui/theme/omarchy.rs`) or from the built-in fallback palette.
+  (`src/ui/theme/mod.rs`), read with `Theme::get(role)`; sourced either from
+  the active Omarchy theme (`src/ui/theme/omarchy.rs`) or from the built-in
+  fallback palette.
 
 ### Target domain (to be built)
 
@@ -266,7 +271,7 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
   | --- | --- | --- | --- | --- |
   | Startup (pre-TUI) | none — the file read is instant | zero conflicts → `udiff: no conflicts in <file>`, exit non-zero, no TUI | one-line message with line number, exit non-zero, nothing written | TUI opens with conflict 1 of N selected |
   | Main TUI | none — first frame draws immediately | unreachable (empty never opens the TUI) | never blanks: errors are status-line messages, the editor keeps the text | three panels, branch labels, `conflict i of N`, live current text |
-  | Status line | — | — | `error: line 12: missing ======= in conflict 2`; after save: `warning: resolved file saved but not staged` (then exit non-zero) | `conflict 3 of 7 · modified`; `saved and staged` on success |
+  | Status line | — | — | `conflict 2: line 3 looks like a conflict marker` (save-time rejection, editor keeps the text); after a failed stage: `warning: resolved file saved but not staged` (then exit non-zero) | `conflict 3 of 7 · modified`; `saved and staged` printed to stdout after the terminal is restored (the keymap exits on save) |
 
 - **Accessibility floor:** keyboard-only (mouse is disabled); every state is
   named in text as well as color (`modified`, `conflict 3 of 7`); below 60×12
