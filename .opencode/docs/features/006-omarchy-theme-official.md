@@ -5,13 +5,10 @@ Split from PLAN.md Phase 4 ("Omarchy theme: make it official") and the
 Omarchy bullet of item 0. Built on branch `complete-plan`.
 -->
 
-**Status:** building
+**Status:** done
 **Author:** plan agent (split from `PLAN.md`), approved by luis
 **Date:** 2026-10-31
 **Architecture version:** commit 7dc3b40 of `.opencode/docs/architecture.md`
-
-> Waiting on one owner check: manual acceptance check 10 (live theme switch on
-> an Omarchy desktop). Set `Status: done` after it passes.
 
 ---
 
@@ -151,10 +148,19 @@ src/ui/theme/omarchy.rs (existing, unchanged)
 Proven by command:
 - AC1: `grep -n -A12 "^## Theme" README.md`
 - AC2: `grep -n "sanctioned non-conflict feature" AGENTS.md`
-- AC3: `git diff main..complete-plan --stat -- src/ui/theme/` prints nothing,
-  and `grep -n "event::poll(Duration::from_secs(1))" src/main.rs` matches.
-- AC5: manual acceptance check 10 in `PLAN.md` — **pending, for the owner**
-  (needs an Omarchy desktop).
+- AC3: `git diff 7dc3b40..HEAD --stat -- src/ui/theme/` prints nothing — was
+  `git diff main..complete-plan --stat -- src/ui/theme/`, but `complete-plan`
+  was squash-merged into `main` as `4fe21a7` and the branch is gone; MVP → HEAD
+  is the same proof (see §7/§8). Also:
+  `grep -n "event::poll(Duration::from_secs(1))" src/main.rs` matches (line
+  184).
+- AC5: manual acceptance check 10 in `PLAN.md` — **passed 2026-11-01** on the
+  owner's Omarchy desktop (owner approved running it from the build agent):
+  with udiff open in tmux on a scratch conflicted repo, `omarchy theme set
+  catppuccin-latte` changed udiff's panel colors within the 1 s idle poll
+  (measured 1324 ms on the switch back to `ethereal`); with
+  `UDIFF_OMARCHY_DIR=/nonexistent` udiff drew the built-in named-color
+  palette (256-color codes, no RGB).
 
 ---
 
@@ -175,8 +181,9 @@ Proven by command:
 - [x] Every test in §4 exists with the exact name and passes
 - [x] `cargo clippy --all-targets -- -D warnings` reports no errors
 - [x] `cargo check --all-targets` exits zero
-- [ ] Every acceptance criterion in §1.4 is referenced by a passing test or the
-      command named for it — AC5 waits on manual check 10
+- [x] Every acceptance criterion in §1.4 is referenced by a passing test or the
+      command named for it (AC5 by manual acceptance check 10, passed
+      2026-11-01 — see §4)
 - [x] `grep -rn "Command::new" src/ | grep -v 'src/git.rs'` returns nothing
       (architecture.md §5 rule 4; grep narrowed per 000 D1)
 - [x] `cargo tree --depth 1` lists no dependency besides `ratatui`
@@ -187,10 +194,28 @@ Proven by command:
 
 ## 7. Deviations
 
-None — executed verbatim.
+| # | What | Where | Why |
+| --- | --- | --- | --- |
+| 1 | AC3 proof command rewritten from `git diff main..complete-plan --stat -- src/ui/theme/` to `git diff 7dc3b40..HEAD --stat -- src/ui/theme/` | §4, AC3 | `complete-plan` was squash-merged into `main` (PR #1, `4fe21a7`) and the branch no longer exists; MVP → HEAD proves the same thing (no theme-file change by 001–007). |
+| 2 | AC5 verified by the build agent on the owner's Omarchy desktop instead of staying "pending, for the owner" | §1.4, §4, §6 | tmux and the `omarchy` CLI are available on this machine; the owner approved the live theme switch in the `/implement-feature 006` session (2026-11-01). |
 
 ---
 
 ## 8. Drifts
 
-None — no deviations.
+1. **AC3's named branch no longer exists** — `Cause:` stale-context.
+   `Evidence:` `git branch -a` after the squash-merge PR #1 lists no
+   `complete-plan`; `git diff main..complete-plan …` fails. `Why the plan
+   missed it:` this doc was written on the feature branch before the merge and
+   assumed the branch would still exist at verification time. `Fix applied:`
+   §4 AC3 now names `git diff 7dc3b40..HEAD --stat -- src/ui/theme/`, which
+   prints nothing. `Follow-up:` none — the stale reference was in this doc's
+   §4, not in `architecture.md`; no architecture section needed fixing.
+2. **AC5 executed by the build agent, not the owner** — `Cause:` user-decision.
+   `Evidence:` the owner selected "Run the full check now" in the
+   `/implement-feature 006` session on 2026-11-01; check 10 passed (panel
+   colors changed ~1.3 s after each live theme switch; the
+   `UDIFF_OMARCHY_DIR=/nonexistent` override drew the built-in palette).
+   `Why the plan missed it:` the plan assumed check 10 needed an owner at an
+   Omarchy desktop; this build agent runs on one. `Fix applied:` AC5 verified
+   live; the §1.4 note, §4 and §6 updated. `Follow-up:` none.
