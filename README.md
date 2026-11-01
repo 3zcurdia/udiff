@@ -28,7 +28,9 @@ byte-identical on save.
 Implemented: `udiff` opens one conflicted file, steps through its conflicts,
 takes remote/local/both or hand-edits the resolution, then writes the
 marker-free file and stages it (`git add`) so the ongoing merge or rebase can
-continue. `git mergetool` works via the wiring below; branch labels (including
+continue. Saving is refused until every conflict has been resolved (taken or
+edited); unresolved conflicts are dimmed in the **current** panel and counted
+on the status line. `git mergetool` works via the wiring below; branch labels (including
 the detached-HEAD short SHA mid-rebase) come from the markers plus git.
 
 ## Build & run
@@ -49,18 +51,38 @@ target/release/udiff path/to/conflicted-file
 ```
 Normal mode
   n / p        next / previous conflict (stops at the ends)
-  r / l / b    take remote / local / both
+  r / l / b    take remote / local / both (both = local, then remote)
   Enter / i    enter Edit mode
-  s            save: write the file, stage it, exit 0
-  q            quit without saving (the file stays untouched)
+  ↑ / ↓        scroll all panels one line
+  PgUp / PgDn  scroll all panels ten lines
+  ← / →        scroll all panels sideways
+  Home         scroll back to the selected conflict
+  s            save: refused while any conflict is unresolved; writes the
+               file, stages it (udiff <file> form), exits 0
+  q            quit without saving, exit 1 (press twice if there are edits)
 
 Edit mode
-  printable    insert at the cursor
+  printable    insert at the cursor          Tab: insert a tab
   Enter        newline
-  Backspace    delete before the cursor    Delete: delete at the cursor
-  arrows       move the cursor within the text
+  Backspace    delete before the cursor      Delete: delete at the cursor
+  arrows       move the cursor               Home / End: line start / end
   Esc          back to Normal mode
 ```
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | resolved file written (and staged, in file form) |
+| 1 | quit without saving, or could not read/parse/write |
+| 2 | usage error |
+| 3 | file form only: written, but `git add` failed |
+
+### Conflict styles
+
+`merge.conflictStyle` `merge`, `diff3` and `zdiff3` are all supported; the
+base section of diff3/zdiff3 is not shown (the layout has no base panel). A
+custom `conflict-marker-size` gitattribute is not supported.
 
 ### git mergetool wiring
 
@@ -73,4 +95,17 @@ git config --global mergetool.udiff.trustExitCode true
 ```
 
 `trustExitCode` matters: without it git ignores udiff's exit code and would
-continue after a failed save.
+continue after a failed save. In mergetool form udiff does not run `git add`
+itself — git stages the file after udiff exits 0.
+
+## Theme
+
+- With no Omarchy theme present, udiff uses its built-in palette (named
+  terminal colors only).
+- On Omarchy, it reads `colors.toml` from
+  `~/.local/state/omarchy/current/theme`, else
+  `~/.config/omarchy/current/theme`, and follows theme switches live (checked
+  once a second while idle; the file is re-read only when its modification
+  time changes).
+- `UDIFF_OMARCHY_DIR=<dir>` overrides the location. A directory without a
+  `colors.toml` forces the built-in palette — that is how to turn it off.

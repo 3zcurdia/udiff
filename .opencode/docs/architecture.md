@@ -35,6 +35,11 @@ Current state (what is built):
 | Branch labels (marker labels + HEAD resolution) | built |
 | Theme layer (built-in palette + Omarchy follow) | built |
 | Unit tests (`cargo test`) | built |
+| diff3 / zdiff3 conflict styles (base dropped) | built |
+| Unresolved-conflict save gate | built |
+| Synchronized scrolling (vertical + horizontal) | built |
+| CLI integration tests (`tests/cli.rs`) | built |
+| CI (GitHub Actions: fmt, clippy, test) | built (not yet run on GitHub) |
 
 Keep this table honest. A row flips to `built` in the same change that builds
 it, never before. When the product charges money, the table always carries a
@@ -46,6 +51,11 @@ Build note (2026-10-31): `features/000-project-setup.md` built every unbuilt
 row above in one change — marker parsing, the three-panel TUI with per-conflict
 editing, save + stage, the `git mergetool` entry, branch labels, the theme
 layer and 34 unit tests — all verified with the commands in §2.
+Build note (2026-10-31): features 001–007 (split from `PLAN.md`, branch
+`complete-plan`) added the safe quit and exit-code contract, the strict
+marker grammar with diff3/zdiff3, the unresolved save gate, the editing line
+model, synchronized scrolling, `tests/cli.rs` and CI — 67 unit tests plus 6
+CLI tests.
 
 ### 1.1 Monetization
 
@@ -68,8 +78,12 @@ layer and 34 unit tests — all verified with the commands in §2.
   (§3). There are no schema files and no migrations.
 - **Auth, background work, caching, file storage:** none of these exist. One
   thread, no network, no log files, no config file.
-- **Testing:** `cargo test` (Rust std harness). Tests live in
-  `#[cfg(test)] mod tests` inside `src/` modules (this repo's `AGENTS.md` rule).
+- **Testing:** `cargo test` (Rust std harness). Unit tests live in
+  `#[cfg(test)] mod tests` inside `src/` modules; black-box CLI tests of the
+  pre-TUI paths live in `tests/cli.rs` (this repo's `AGENTS.md` rule).
+- **CI:** `.github/workflows/ci.yml` (GitHub Actions, `jdx/mise-action`):
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` on every push and pull request.
 - **Lint and formatting:** `cargo clippy --all-targets -- -D warnings` and
   `cargo fmt`, both with defaults. No custom rules, no `clippy.toml`, no
   `rustfmt.toml`.
@@ -115,14 +129,21 @@ where a thing lives.
   preserved.
 - `Conflict` — one marker block: `remote_label: String`, `remote_text: String`
   (the side between `=======` and `>>>>>>>`), `local_label: String`,
-  `local_text: String` (the side between `<<<<<<<` and `=======`), and
-  `current_text: String` (the resolution being built; starts as
-  `remote_text + local_text`, assumption A2). Identified by its **1-based
-  document-order index**, `conflict 1..N`; unique by construction.
-- Marker grammar — a line starting with 7 or more `<` opens a conflict and its
-  label is the rest of the line; a line of exactly 7 or more `=` and nothing
-  else separates the sides; a line starting with 7 or more `>` closes it and
-  carries the remote label. Marker lines (with their line terminator) belong to
+  `local_text: String` (the side between `<<<<<<<` and `|||||||` or
+  `=======`), `current_text: String` (the resolution being built; starts as
+  `local_text + remote_text`, feature 003), `resolved: bool` (false after
+  parse; set by `App` when the user takes a side or edits) and
+  `line_ending: &'static str` (`"\r\n"` or `"\n"`, from the `<<<<<<<` line;
+  edits join lines with it). Identified by its **1-based document-order
+  index**, `conflict 1..N`; unique by construction.
+- Marker grammar — git's exact shape (feature 002): exactly 7 `<`, `|` or `>`
+  followed by end of line or a space and an optional label, or a line that is
+  exactly `=======`. `<<<<<<<` opens (local label), `|||||||` starts the
+  diff3/zdiff3 base section whose lines are dropped, the first `=======`
+  separates the sides, `>>>>>>>` closes (remote label). Outside a conflict
+  only `<<<<<<<` and `>>>>>>>` are markers; `=======` and `|||||||` lines are
+  text. `conflict::is_marker_line` is the one classifier, also used by
+  save-time validation. Marker lines (with their line terminator) belong to
   the grammar and are never part of any text run.
 
 ### Session — `src/app.rs`
@@ -131,16 +152,22 @@ where a thing lives.
   internally, displayed 1-based), `cursor: (usize, usize)` (line, column inside
   the selected conflict's `current_text`), `mode: Mode`, `dirty: bool`,
   `message: Option<Message>`, `local_branch: Option<String>` (resolved once at
-  startup). One per process. States: `clean` / `dirty`.
+  startup), `quit_armed: bool` (a `q` on a dirty session arms it; the next `q`
+  quits) and `scroll: (isize, usize)` (shared panel offset, clamped by
+  `ui::clamp_scroll` before every draw). One per process. States: `clean` /
+  `dirty`.
 - `Mode` — `Normal` or `Edit`. In `Normal` the single-key commands run; in
   `Edit` every printable key is text.
-- `Message` — `Message::Info(String)` or `Message::Error(String)`; transient,
-  replaced on the next key event.
+- `Message` — `Message::Error(String)`; transient, replaced on the next key
+  event. Success is printed by the shell after the terminal is restored.
 - `Action` — the user intent of one key event (`NextConflict`, `TakeRemote`,
-  `Save`, …), produced by `ui::translate_key` and consumed by `App::dispatch`.
+  `Save`, `Scroll { down, right }`, `ScrollReset`, `MoveCursor(Direction)`, …),
+  produced by `ui::translate_key` and consumed by `App::dispatch`.
 - `Outcome` — `Outcome::Continue`, `Outcome::SaveRequested { text: String }`, or
-  `Outcome::Quit { saved: bool }`; the only way the pure core tells the shell
-  to do I/O.
+  `Outcome::Quit`; the only way the pure core tells the shell to do I/O.
+- Save gate — `s` is refused while `conflict::count_unresolved > 0` (selection
+  jumps to the first unresolved conflict), then while any resolution line is a
+  marker.
 
 ### Git boundary — `src/git.rs`
 
@@ -148,8 +175,9 @@ where a thing lives.
   `git branch --show-current`, falling back to `git rev-parse --short HEAD` when
   detached (mid-rebase); any failure falls back to the literal marker label.
   The remote label is always the marker label verbatim.
-- Staging — `git add -- <file>` after a successful write; the only write-side
-  git call in the project.
+- Staging — `git add -- <file>` after a successful write, in the
+  `udiff <file>` form only; in the mergetool form git stages `$MERGED` itself
+  after exit 0. The only write-side git call in the project.
 
 ### TUI — `src/ui/`
 
@@ -186,6 +214,7 @@ file.
 | OS-theme (Omarchy) follow | `src/ui/theme/omarchy.rs` | The only module that reads theme files. |
 | git subprocess calls | `src/git.rs` | The only module allowed to run a subprocess (`std::process::Command`). |
 | Unit tests | `#[cfg(test)] mod tests` inside each `src/` module | Inline `&str` fixtures; no cross-module test helpers, no dev-dependencies. |
+| CLI integration tests | `tests/cli.rs` | Runs the built binary (`CARGO_BIN_EXE_udiff`) with stdin null; only paths that exit before the TUI starts. No dependencies. |
 
 The one rule that decides which layer owns a decision: **a decision belongs to
 the layer that can make it without a terminal and without a subprocess.**
@@ -209,7 +238,9 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
    Prevents two diverging renderings of "the sides".
 4. **Exactly two git calls.** Read-only label resolution at startup
    (`git branch --show-current`, then `git rev-parse --short HEAD`) and
-   `git add -- <file>` on save — both in `src/git.rs`, nothing else ever execs.
+   `git add -- <file>` on save — both in `src/git.rs`; no other product code
+   in `src/` ever execs (`tests/cli.rs` runs the udiff binary itself, which is
+   test code, not product code).
    Prevents hidden coupling to git behavior throughout the codebase.
 5. **Conflicted files only.** A file without conflict markers is refused
    (`udiff: no conflicts in <file>`, exit non-zero). Never grow into a general
@@ -228,8 +259,10 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
    status-line messages.** Load/parse failures print one message with a line
    number and exit non-zero with nothing written; runtime errors never blank
    the screen or lose the user's text.
-10. **Tests live in `#[cfg(test)]` modules in `src/`.** Inline fixtures, temp
-    files under `std::env::temp_dir()`, no test-only crates (`AGENTS.md`).
+10. **Tests live in `#[cfg(test)]` modules in `src/`, plus `tests/cli.rs`.**
+    Inline fixtures, temp files under `std::env::temp_dir()`, no test-only
+    crates (`AGENTS.md`). `tests/cli.rs` holds only black-box tests of the
+    pre-TUI command-line paths.
 
 ### Rust specifics that follow from the rules
 
@@ -271,7 +304,15 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
   | --- | --- | --- | --- | --- |
   | Startup (pre-TUI) | none — the file read is instant | zero conflicts → `udiff: no conflicts in <file>`, exit non-zero, no TUI | one-line message with line number, exit non-zero, nothing written | TUI opens with conflict 1 of N selected |
   | Main TUI | none — first frame draws immediately | unreachable (empty never opens the TUI) | never blanks: errors are status-line messages, the editor keeps the text | three panels, branch labels, `conflict i of N`, live current text |
-  | Status line | — | — | `conflict 2: line 3 looks like a conflict marker` (save-time rejection, editor keeps the text); after a failed stage: `warning: resolved file saved but not staged` (then exit non-zero) | `conflict 3 of 7 · modified`; `saved and staged` printed to stdout after the terminal is restored (the keymap exits on save) |
+  | Status line | — | — | `2 of 7 conflicts unresolved` (save refused, selection jumps there); `conflict 2: line 3 looks like a conflict marker` (save-time rejection, editor keeps the text); `unsaved changes — press q again to discard` | `conflict 3 of 7 · 2 unresolved · <remote> \| <local>`, with `modified` when dirty; after save, stdout gets `udiff: saved and staged <path>` (file form) or `udiff: saved <path>` (mergetool form) once the terminal is restored; a failed `git add` prints `udiff: warning: …` on stderr and exits 3 |
+
+- **Exit codes:** 0 resolved file written (and staged, in file form); 1 quit
+  without saving, or could not read/parse/write; 2 usage error; 3 file form
+  only: written, but `git add` failed.
+- **Keys beyond the v1 keymap:** Normal mode ↑/↓, PgUp/PgDn, ←/→ scroll all
+  panels together and Home returns to the selected conflict; Edit mode Tab
+  inserts a real tab (drawn at 4-column stops) and Home/End move within the
+  line. Unresolved conflicts are drawn dim and italic in the current panel.
 
 - **Accessibility floor:** keyboard-only (mouse is disabled); every state is
   named in text as well as color (`modified`, `conflict 3 of 7`); below 60×12
@@ -285,6 +326,9 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
   (`parses_two_conflicts_preserving_text_runs`), with inline `&str` fixtures and
   local helper functions in the test module. Save tests write real files under
   `std::env::temp_dir()` named `udiff-test-<pid>-<counter>` and remove them.
+  `tests/cli.rs` runs the binary for the paths that exit before the TUI
+  (`--help`, `--version`, bad arity, unreadable, no conflicts, malformed);
+  never a valid conflicted file, which would open the TUI and hang.
 - **Every new surface must be tested for:** the happy path, empty input,
   malformed input (with the reported line number), the boundary case (first and
   last conflict), and byte-preservation of text outside conflicts.
