@@ -1,0 +1,14 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      # Toolchain version must match mise.toml. Plain `rustup component add`
+      # would target the runner's default toolchain, not mise's pinned one.
+      - run: rustup component add --toolchain 1.99.1 rustfmt clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

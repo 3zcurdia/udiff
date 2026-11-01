@@ -4,7 +4,9 @@
 //! Pure: no terminal, no subprocess, no `std::fs`. It decides what would be
 //! saved; the shell in `src/main.rs` saves it.
 
-use crate::conflict::{Conflict, ConflictFile, Region, count_conflicts, render_resolved};
+use crate::conflict::{
+    Conflict, ConflictFile, Region, count_conflicts, count_unresolved, render_resolved,
+};
 use std::path::PathBuf;
 
 /// One editing session over one conflicted file.
@@ -24,6 +26,13 @@ pub struct App {
     pub message: Option<Message>,
     /// The current side's branch name, resolved once at startup via git.
     pub local_branch: Option<String>,
+    /// Set by a `q` on a dirty session; the next `q` quits, any other action
+    /// disarms it.
+    pub quit_armed: bool,
+    /// Shared view offset of all three panels: lines down from each panel's
+    /// anchor at the selected conflict, and columns right. The shell clamps it
+    /// to the panels before every draw.
+    pub scroll: (isize, usize),
 }
 
 /// Single-key commands in Normal mode; free text in Edit mode.
@@ -36,7 +45,6 @@ pub enum Mode {
 /// A one-line status message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
-    Info(String),
     Error(String),
 }
 
@@ -55,6 +63,8 @@ pub enum Action {
     Backspace,
     Delete,
     MoveCursor(Direction),
+    Scroll { down: isize, right: isize },
+    ScrollReset,
     Save,
     Quit,
     Ignored,
@@ -66,6 +76,8 @@ pub enum Direction {
     Right,
     Up,
     Down,
+    LineStart,
+    LineEnd,
 }
 
 /// How the pure core tells the shell to touch the outside world.
@@ -73,7 +85,7 @@ pub enum Direction {
 pub enum Outcome {
     Continue,
     SaveRequested { text: String },
-    Quit { saved: bool },
+    Quit,
 }
 
 impl App {
@@ -89,17 +101,23 @@ impl App {
             dirty: false,
             message: None,
             local_branch,
+            quit_armed: false,
+            scroll: (0, 0),
         };
         app.cursor = end_cursor(&app.selected_conflict().current_text);
         app
     }
 
     /// Applies one action. Never performs I/O: `Save` yields the rendered text
-    /// for the shell to write, `Quit` yields the saved flag.
+    /// for the shell to write; `Quit` asks twice when there are unsaved edits.
     pub fn dispatch(&mut self, action: Action) -> Outcome {
         self.message = None;
+        if action != Action::Quit && action != Action::Ignored {
+            self.quit_armed = false;
+        }
         match action {
             Action::NextConflict => {
+                self.scroll = (0, 0);
                 if self.selected + 1 < count_conflicts(&self.file) {
                     self.selected += 1;
                     self.cursor = end_cursor(&self.selected_conflict().current_text);
@@ -107,6 +125,7 @@ impl App {
                 Outcome::Continue
             }
             Action::PrevConflict => {
+                self.scroll = (0, 0);
                 if self.selected > 0 {
                     self.selected -= 1;
                     self.cursor = end_cursor(&self.selected_conflict().current_text);
@@ -128,7 +147,7 @@ impl App {
                     let conflict = self.selected_conflict();
                     (conflict.remote_text.clone(), conflict.local_text.clone())
                 };
-                self.replace_current(format!("{remote}{local}"));
+                self.replace_current(format!("{local}{remote}"));
                 Outcome::Continue
             }
             Action::EnterEdit => {
@@ -159,25 +178,51 @@ impl App {
                 self.move_cursor(direction);
                 Outcome::Continue
             }
+            Action::Scroll { down, right } => {
+                self.scroll.0 = self.scroll.0.saturating_add(down);
+                self.scroll.1 = self.scroll.1.saturating_add_signed(right);
+                Outcome::Continue
+            }
+            Action::ScrollReset => {
+                self.scroll = (0, 0);
+                Outcome::Continue
+            }
+            Action::Save if count_unresolved(&self.file) > 0 => {
+                let unresolved = count_unresolved(&self.file);
+                self.selected = self.first_unresolved();
+                self.cursor = end_cursor(&self.selected_conflict().current_text);
+                self.message = Some(Message::Error(format!(
+                    "{unresolved} of {} conflicts unresolved",
+                    count_conflicts(&self.file)
+                )));
+                Outcome::Continue
+            }
             Action::Save => match self.validate_save() {
-                Ok(()) => {
-                    self.message = Some(Message::Info("saved and staged".to_string()));
-                    Outcome::SaveRequested {
-                        text: render_resolved(&self.file),
-                    }
-                }
+                Ok(()) => Outcome::SaveRequested {
+                    text: render_resolved(&self.file),
+                },
                 Err(text) => {
                     self.message = Some(Message::Error(text));
                     Outcome::Continue
                 }
             },
-            Action::Quit => Outcome::Quit { saved: !self.dirty },
+            Action::Quit => {
+                if !self.dirty || self.quit_armed {
+                    Outcome::Quit
+                } else {
+                    self.quit_armed = true;
+                    self.message = Some(Message::Error(
+                        "unsaved changes — press q again to discard".to_string(),
+                    ));
+                    Outcome::Continue
+                }
+            }
             Action::Ignored => Outcome::Continue,
         }
     }
 
-    /// Rejects any `current_text` line starting with 7+ `<`, `=` or `>`
-    /// characters; the returned text goes to the status line.
+    /// Rejects any `current_text` line that is a git conflict marker; the
+    /// returned text goes to the status line.
     pub fn validate_save(&self) -> Result<(), String> {
         let mut conflict_number = 0;
         for region in &self.file.regions {
@@ -188,7 +233,7 @@ impl App {
             conflict_number += 1;
             for (offset, line) in conflict.current_text.split('\n').enumerate() {
                 let content = line.strip_suffix('\r').unwrap_or(line);
-                if starts_with_marker(content) {
+                if crate::conflict::is_marker_line(content) {
                     return Err(format!(
                         "conflict {conflict_number}: line {} looks like a conflict marker",
                         offset + 1
@@ -205,10 +250,19 @@ impl App {
         self.conflict_at(self.selected)
     }
 
-    /// Swaps in a whole side (remote, local or both) and marks the session dirty.
+    /// Index of the first conflict the user has not resolved, or 0.
+    fn first_unresolved(&self) -> usize {
+        (0..count_conflicts(&self.file))
+            .find(|&index| !self.conflict_at(index).resolved)
+            .unwrap_or(0)
+    }
+
+    /// Swaps in a whole side (remote, local or both), marks the conflict
+    /// resolved and the session dirty.
     fn replace_current(&mut self, text: String) {
         let conflict = self.conflict_at_mut(self.selected);
         conflict.current_text = text;
+        conflict.resolved = true;
         let cursor = end_cursor(&conflict.current_text);
         self.dirty = true;
         self.cursor = cursor;
@@ -220,18 +274,14 @@ impl App {
         F: FnOnce(&mut Vec<String>, &mut (usize, usize)),
     {
         let index = self.selected;
-        let mut lines: Vec<String> = self
-            .conflict_at(index)
-            .current_text
-            .split('\n')
-            .map(str::to_string)
-            .collect();
+        let mut lines = edit_lines(&self.conflict_at(index).current_text);
         let mut cursor = self.cursor;
         clamp_cursor(&mut cursor, &lines);
         edit(&mut lines, &mut cursor);
         clamp_cursor(&mut cursor, &lines);
         let conflict = self.conflict_at_mut(index);
-        conflict.current_text = lines.join("\n");
+        conflict.current_text = join_lines(&lines, conflict.line_ending);
+        conflict.resolved = true;
         self.cursor = cursor;
         self.dirty = true;
     }
@@ -239,13 +289,7 @@ impl App {
     /// Moves the cursor inside the current text, bounded by its lines. A move
     /// mutates no text, so it never sets the dirty flag.
     fn move_cursor(&mut self, direction: Direction) {
-        let index = self.selected;
-        let lines: Vec<String> = self
-            .conflict_at(index)
-            .current_text
-            .split('\n')
-            .map(str::to_string)
-            .collect();
+        let lines = edit_lines(&self.conflict_at(self.selected).current_text);
         let mut cursor = self.cursor;
         clamp_cursor(&mut cursor, &lines);
         let (line, column) = cursor;
@@ -256,6 +300,8 @@ impl App {
             Direction::Right if column < width => (line, column + 1),
             Direction::Right if line + 1 < lines.len() => (line + 1, 0),
             Direction::Up if line > 0 => (line - 1, column.min(lines[line - 1].chars().count())),
+            Direction::LineStart => (line, 0),
+            Direction::LineEnd => (line, width),
             Direction::Down if line + 1 < lines.len() => {
                 (line + 1, column.min(lines[line + 1].chars().count()))
             }
@@ -289,14 +335,34 @@ impl App {
     }
 }
 
-const MARKER_LEN: usize = 7;
-
-/// Cursor position at the very end of a text: past the last newline, at the
-/// end of the last line.
+/// Cursor position at the end of a resolution's last line.
 fn end_cursor(text: &str) -> (usize, usize) {
-    let line = text.matches('\n').count();
-    let column = text.rsplit('\n').next().unwrap_or_default().chars().count();
-    (line, column)
+    let lines = edit_lines(text);
+    let last = lines.len() - 1;
+    (last, lines[last].chars().count())
+}
+
+/// The editable lines of a resolution: one trailing terminator removed, then
+/// split on `\n` with any `\r` stripped. "" → [""].
+fn edit_lines(text: &str) -> Vec<String> {
+    let body = text
+        .strip_suffix('\n')
+        .map(|text| text.strip_suffix('\r').unwrap_or(text))
+        .unwrap_or(text);
+    body.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect()
+}
+
+/// Inverse of `edit_lines`: joined with `line_ending`, plus one trailing
+/// `line_ending` — except `[""]`, which is the empty resolution "".
+fn join_lines(lines: &[String], line_ending: &str) -> String {
+    if lines.len() == 1 && lines[0].is_empty() {
+        return String::new();
+    }
+    let mut text = lines.join(line_ending);
+    text.push_str(line_ending);
+    text
 }
 
 fn clamp_cursor(cursor: &mut (usize, usize), lines: &[String]) {
@@ -309,12 +375,6 @@ fn char_offset(text: &str, column: usize) -> usize {
     text.char_indices()
         .nth(column)
         .map_or(text.len(), |(offset, _)| offset)
-}
-
-fn starts_with_marker(line: &str) -> bool {
-    ['<', '=', '>']
-        .iter()
-        .any(|&marker| line.chars().take_while(|&c| c == marker).count() >= MARKER_LEN)
 }
 
 fn insert_char(lines: &mut [String], cursor: &mut (usize, usize), character: char) {
@@ -393,6 +453,11 @@ mod tests {
          >>>>>>> theirs\n\
          after line\n";
 
+    const CRLF_SIDES: &str =
+        "<<<<<<< ours\r\nlocal line\r\n=======\r\nremote line\r\n>>>>>>> theirs\r\n";
+
+    const EMPTY_SIDES: &str = "<<<<<<< ours\n=======\n>>>>>>> theirs\n";
+
     /// The line a user types into the current panel that must never be saved.
     const TYPED_MARKER_LINE: &str = ">>>>>>> typed-away\n";
 
@@ -434,12 +499,12 @@ mod tests {
         assert!(app.message.is_none());
         assert_eq!(
             app.cursor,
-            (4, 0),
-            "cursor starts at the end of the current text"
+            (3, 10),
+            "cursor starts at the end of the last line"
         );
         assert_eq!(
             app.selected_conflict().current_text,
-            "remote one\nremote two\nlocal one\nlocal two\n"
+            "local one\nlocal two\nremote one\nremote two\n"
         );
     }
 
@@ -471,12 +536,12 @@ mod tests {
     }
 
     #[test]
-    fn take_both_concatenates_remote_then_local() {
+    fn take_both_concatenates_local_then_remote() {
         let mut app = app_over(ONE_CONFLICT_BASIC);
         app.dispatch(Action::TakeBoth);
         assert_eq!(
             current_of(&app, 0),
-            "remote one\nremote two\nlocal one\nlocal two\n"
+            "local one\nlocal two\nremote one\nremote two\n"
         );
     }
 
@@ -487,10 +552,7 @@ mod tests {
         app.dispatch(Action::EnterEdit);
         app.dispatch(Action::InsertChar('X'));
         let edited = current_of(&app, 0);
-        assert!(
-            edited.ends_with("X"),
-            "the character was inserted: {edited:?}"
-        );
+        assert_eq!(edited, "local a\nremote aX\n");
         assert_eq!(
             current_of(&app, 1),
             second_before,
@@ -514,6 +576,7 @@ mod tests {
     fn typed_marker_line_is_rejected_on_save() {
         let mut app = app_over(ONE_CONFLICT_BASIC);
         app.dispatch(Action::EnterEdit);
+        app.dispatch(Action::InsertNewline);
         for character in TYPED_MARKER_LINE.chars() {
             if character == '\n' {
                 app.dispatch(Action::InsertNewline);
@@ -534,15 +597,16 @@ mod tests {
     }
 
     #[test]
-    fn save_text_equals_original_when_untouched() {
+    fn save_after_resolving_all_writes_resolution() {
         let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
         let expected = "before line\n\
              remote a\n\
-             local a\n\
              between line\n\
-             remote b\n\
              local b\n\
              after line\n";
+        app.dispatch(Action::TakeRemote);
+        app.dispatch(Action::NextConflict);
+        app.dispatch(Action::TakeLocal);
         let outcome = app.dispatch(Action::Save);
         let text = match outcome {
             Outcome::SaveRequested { text } => text,
@@ -550,7 +614,7 @@ mod tests {
         };
         assert_eq!(
             text, expected,
-            "untouched save keeps every text run byte-exact"
+            "text runs stay byte-exact around the resolutions"
         );
         // The shell writes exactly this string; prove the bytes over a real file.
         let path = temp_path();
@@ -583,11 +647,12 @@ mod tests {
         );
         app.dispatch(Action::EnterEdit);
         app.dispatch(Action::InsertChar('q'));
-        let outcome = app.dispatch(Action::Quit);
-        match outcome {
-            Outcome::Quit { saved } => assert!(!saved, "dirty session, nothing saved"),
-            other => panic!("expected Quit, got {other:?}"),
-        }
+        assert_eq!(
+            app.dispatch(Action::Quit),
+            Outcome::Continue,
+            "a dirty session asks before quitting"
+        );
+        assert_eq!(app.dispatch(Action::Quit), Outcome::Quit);
         // The shell writes only on SaveRequested; this session produced none.
         assert_eq!(
             fs::read(&path).expect("read it back"),
@@ -595,5 +660,148 @@ mod tests {
             "the file is byte-identical"
         );
         fs::remove_file(&path).expect("remove the temp file");
+    }
+
+    #[test]
+    fn clean_session_quits_on_first_q() {
+        let mut app = app_over(ONE_CONFLICT_BASIC);
+        assert_eq!(app.dispatch(Action::Quit), Outcome::Quit);
+    }
+
+    #[test]
+    fn other_key_disarms_quit() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        app.dispatch(Action::EnterEdit);
+        app.dispatch(Action::InsertChar('x'));
+        app.dispatch(Action::ExitEdit);
+        assert_eq!(app.dispatch(Action::Quit), Outcome::Continue);
+        assert_eq!(app.dispatch(Action::NextConflict), Outcome::Continue);
+        assert_eq!(
+            app.dispatch(Action::Quit),
+            Outcome::Continue,
+            "re-armed, not quit"
+        );
+    }
+
+    #[test]
+    fn save_accepts_long_equals_line() {
+        let mut app = app_over(ONE_CONFLICT_BASIC);
+        app.dispatch(Action::EnterEdit);
+        for _ in 0..10 {
+            app.dispatch(Action::InsertChar('='));
+        }
+        assert_eq!(app.validate_save(), Ok(()));
+    }
+
+    #[test]
+    fn save_refused_while_unresolved() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        app.dispatch(Action::NextConflict);
+        app.dispatch(Action::TakeLocal);
+        assert_eq!(app.dispatch(Action::Save), Outcome::Continue);
+        assert_eq!(app.selected, 0, "jumps to the first unresolved conflict");
+        assert_eq!(
+            app.message,
+            Some(Message::Error("1 of 2 conflicts unresolved".to_string()))
+        );
+    }
+
+    #[test]
+    fn edit_marks_resolved_navigation_does_not() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        app.dispatch(Action::NextConflict);
+        app.dispatch(Action::PrevConflict);
+        assert_eq!(count_unresolved(&app.file), 2);
+        app.dispatch(Action::EnterEdit);
+        app.dispatch(Action::InsertChar('x'));
+        assert_eq!(count_unresolved(&app.file), 1);
+        assert!(app.selected_conflict().resolved);
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.dispatch(Action::InsertChar(character));
+        }
+    }
+
+    #[test]
+    fn typing_keeps_following_text_on_its_own_line() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        app.dispatch(Action::TakeLocal);
+        app.dispatch(Action::EnterEdit);
+        app.dispatch(Action::InsertNewline);
+        type_text(&mut app, "foo");
+        app.dispatch(Action::NextConflict);
+        app.dispatch(Action::TakeLocal);
+        assert_eq!(
+            app.dispatch(Action::Save),
+            Outcome::SaveRequested {
+                text: "before line\nlocal a\nfoo\nbetween line\nlocal b\nafter line\n".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn typing_into_empty_resolution_adds_terminator() {
+        let mut app = app_over(EMPTY_SIDES);
+        app.dispatch(Action::EnterEdit);
+        type_text(&mut app, "foo");
+        assert_eq!(current_of(&app, 0), "foo\n");
+    }
+
+    #[test]
+    fn crlf_edits_keep_crlf() {
+        let mut app = app_over(CRLF_SIDES);
+        app.dispatch(Action::TakeLocal);
+        app.dispatch(Action::EnterEdit);
+        app.dispatch(Action::InsertNewline);
+        type_text(&mut app, "x");
+        assert_eq!(current_of(&app, 0), "local line\r\nx\r\n");
+        let before = app.cursor;
+        app.dispatch(Action::MoveCursor(Direction::Right));
+        assert_eq!(app.cursor, before, "the cursor never reaches the \\r");
+    }
+
+    #[test]
+    fn backspace_joins_without_stray_cr() {
+        let mut app = app_over(CRLF_SIDES);
+        app.dispatch(Action::TakeBoth);
+        app.dispatch(Action::EnterEdit);
+        app.cursor = (1, 0);
+        app.dispatch(Action::Backspace);
+        assert_eq!(current_of(&app, 0), "local lineremote line\r\n");
+    }
+
+    #[test]
+    fn home_end_move_within_line() {
+        let mut app = app_over(ONE_CONFLICT_BASIC);
+        app.dispatch(Action::EnterEdit);
+        app.cursor = (1, 3);
+        app.dispatch(Action::MoveCursor(Direction::LineStart));
+        assert_eq!(app.cursor, (1, 0));
+        app.dispatch(Action::MoveCursor(Direction::LineEnd));
+        assert_eq!(app.cursor, (1, "local two".len()));
+    }
+
+    #[test]
+    fn next_conflict_resets_scroll() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        app.dispatch(Action::Scroll { down: 5, right: 8 });
+        assert_eq!(app.scroll, (5, 8));
+        app.dispatch(Action::NextConflict);
+        assert_eq!(app.scroll, (0, 0));
+    }
+
+    #[test]
+    fn scroll_never_dirties() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        app.dispatch(Action::Scroll {
+            down: -3,
+            right: -8,
+        });
+        app.dispatch(Action::ScrollReset);
+        assert_eq!(app.scroll, (0, 0));
+        assert!(!app.dirty);
+        assert_eq!(count_unresolved(&app.file), 2);
     }
 }

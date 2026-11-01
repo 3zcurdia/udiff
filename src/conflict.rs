@@ -32,9 +32,16 @@ pub struct Conflict {
     pub local_label: String,
     /// The side between `<<<<<<<` and `=======`, lines with their terminators.
     pub local_text: String,
-    /// The resolution; starts as `remote_text + local_text` so an unedited
-    /// save can never silently drop a side. Mutated only by `App` actions.
+    /// The resolution; starts as `local_text + remote_text` (local, then
+    /// remote) so editing has both sides to start from. Mutated only by `App`
+    /// actions.
     pub current_text: String,
+    /// False until the user takes a side or edits the resolution; save is
+    /// refused while any conflict is unresolved.
+    pub resolved: bool,
+    /// The terminator of the `<<<<<<<` line (`"\r\n"` or `"\n"`); edits join
+    /// lines with it.
+    pub line_ending: &'static str,
 }
 
 /// Why a file could not be parsed. `line` is 1-based.
@@ -44,13 +51,14 @@ pub struct ParseError {
     pub kind: ParseErrorKind,
 }
 
-/// The four ways a marker block can be malformed.
+/// The ways a marker block can be malformed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseErrorKind {
     MissingSeparator,
     MissingClose,
     MissingOpen,
     NestedOpen,
+    MisplacedBase,
 }
 
 /// Splits a conflicted file into text runs and conflicts. All-or-nothing: on
@@ -64,51 +72,71 @@ pub fn parse(text: &str) -> Result<ConflictFile, ParseError> {
     for (index, raw_line) in text.split_inclusive('\n').enumerate() {
         let line_number = index + 1;
         let content = strip_terminator(raw_line);
-        match classify(content) {
-            None => match open.as_mut() {
-                None => text_run.push_str(raw_line),
-                Some(conflict) if conflict.seen_separator => {
-                    conflict.remote_text.push_str(raw_line)
-                }
-                Some(conflict) => conflict.local_text.push_str(raw_line),
-            },
-            Some(Marker::Open(label)) => {
-                if open.is_some() {
-                    return Err(failure(line_number, ParseErrorKind::NestedOpen));
-                }
-                if !text_run.is_empty() {
-                    regions.push(Region::Text(std::mem::take(&mut text_run)));
-                }
-                open = Some(OpenConflict {
-                    local_label: label.to_string(),
-                    local_text: String::new(),
-                    remote_text: String::new(),
-                    seen_separator: false,
-                });
-                open_line = line_number;
-            }
-            Some(Marker::Separator) => match open.as_mut() {
-                None => return Err(failure(line_number, ParseErrorKind::MissingOpen)),
-                // Only the first `=======` separates the sides; a later one is
-                // ordinary remote-side content (save-time validation rejects it).
-                Some(conflict) => conflict.seen_separator = true,
-            },
-            Some(Marker::Close(label)) => match open.take() {
-                None => return Err(failure(line_number, ParseErrorKind::MissingOpen)),
-                Some(conflict) => {
-                    if !conflict.seen_separator {
-                        return Err(failure(line_number, ParseErrorKind::MissingSeparator));
+        let Some(conflict) = open.as_mut() else {
+            // Outside a conflict only an open marker means anything; a stray
+            // close is an error, and separator or base lines are ordinary
+            // text (a Markdown `=======` underline, for one).
+            match classify(content) {
+                Some(Marker::Open(label)) => {
+                    if !text_run.is_empty() {
+                        regions.push(Region::Text(std::mem::take(&mut text_run)));
                     }
-                    let current_text = format!("{}{}", conflict.remote_text, conflict.local_text);
-                    regions.push(Region::Conflict(Conflict {
-                        remote_label: label.to_string(),
-                        remote_text: conflict.remote_text,
-                        local_label: conflict.local_label,
-                        local_text: conflict.local_text,
-                        current_text,
-                    }));
+                    open = Some(OpenConflict {
+                        line_ending: if raw_line.ends_with("\r\n") {
+                            "\r\n"
+                        } else {
+                            "\n"
+                        },
+                        local_label: label.to_string(),
+                        local_text: String::new(),
+                        remote_text: String::new(),
+                        section: Section::Local,
+                    });
+                    open_line = line_number;
                 }
-            },
+                Some(Marker::Close(_)) => {
+                    return Err(failure(line_number, ParseErrorKind::MissingOpen));
+                }
+                Some(Marker::Separator | Marker::Base) | None => text_run.push_str(raw_line),
+            }
+            continue;
+        };
+        match (classify(content), conflict.section) {
+            (Some(Marker::Open(_)), _) => {
+                return Err(failure(line_number, ParseErrorKind::NestedOpen));
+            }
+            (Some(Marker::Base), Section::Local) => conflict.section = Section::Base,
+            (Some(Marker::Base), Section::Base | Section::Remote) => {
+                return Err(failure(line_number, ParseErrorKind::MisplacedBase));
+            }
+            (Some(Marker::Separator), Section::Local | Section::Base) => {
+                conflict.section = Section::Remote
+            }
+            (Some(Marker::Close(_)), Section::Local | Section::Base) => {
+                return Err(failure(line_number, ParseErrorKind::MissingSeparator));
+            }
+            (Some(Marker::Close(label)), Section::Remote) => {
+                let label = label.to_string();
+                let conflict = open.take().expect("matched an open conflict");
+                let current_text = format!("{}{}", conflict.local_text, conflict.remote_text);
+                regions.push(Region::Conflict(Conflict {
+                    remote_label: label,
+                    remote_text: conflict.remote_text,
+                    local_label: conflict.local_label,
+                    local_text: conflict.local_text,
+                    current_text,
+                    resolved: false,
+                    line_ending: conflict.line_ending,
+                }));
+            }
+            // Base lines (diff3/zdiff3) have no panel in the fixed layout.
+            (None, Section::Base) => {}
+            (None, Section::Local) => conflict.local_text.push_str(raw_line),
+            // Only the first `=======` separates the sides; a later one is
+            // ordinary remote-side content (save-time validation rejects it).
+            (None | Some(Marker::Separator), Section::Remote) => {
+                conflict.remote_text.push_str(raw_line)
+            }
         }
     }
 
@@ -153,46 +181,79 @@ pub fn count_conflicts(file: &ConflictFile) -> usize {
         .count()
 }
 
+/// Number of conflicts the user has not resolved yet.
+pub fn count_unresolved(file: &ConflictFile) -> usize {
+    file.regions
+        .iter()
+        .filter(|region| matches!(region, Region::Conflict(conflict) if !conflict.resolved))
+        .count()
+}
+
 /// A conflict block that is still being read from the file.
 struct OpenConflict {
+    line_ending: &'static str,
     local_label: String,
     local_text: String,
     remote_text: String,
-    seen_separator: bool,
+    section: Section,
+}
+
+/// Which part of an open conflict block the next line belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    /// Between `<<<<<<<` and `|||||||` (or `=======`).
+    Local,
+    /// Between `|||||||` and `=======` (diff3/zdiff3); dropped.
+    Base,
+    /// Between `=======` and `>>>>>>>`.
+    Remote,
 }
 
 /// One recognised marker line.
 enum Marker<'a> {
     Open(&'a str),
+    Base,
     Separator,
     Close(&'a str),
 }
 
 const MARKER_LEN: usize = 7;
 
-/// Classifies a line without its terminator: an open, close or separating
-/// marker, or `None` when the line is ordinary content.
+/// Classifies a line without its terminator: an open, base, close or
+/// separating marker, or `None` when the line is ordinary content.
 fn classify(content: &str) -> Option<Marker<'_>> {
-    if let Some(rest) = strip_marker(content, b'<') {
-        return Some(Marker::Open(rest.trim()));
+    if let Some(label) = marker_label(content, b'<') {
+        return Some(Marker::Open(label));
     }
-    if let Some(rest) = strip_marker(content, b'>') {
-        return Some(Marker::Close(rest.trim()));
+    if let Some(label) = marker_label(content, b'>') {
+        return Some(Marker::Close(label));
     }
-    if content.len() >= MARKER_LEN && content.bytes().all(|byte| byte == b'=') {
+    if marker_label(content, b'|').is_some() {
+        return Some(Marker::Base);
+    }
+    if content == "=======" {
         return Some(Marker::Separator);
     }
     None
 }
 
-/// The rest of the line after a run of at least `MARKER_LEN` marker bytes.
-fn strip_marker(content: &str, marker: u8) -> Option<&str> {
-    let run = content
-        .as_bytes()
-        .iter()
-        .take_while(|&&byte| byte == marker)
-        .count();
-    (run >= MARKER_LEN).then(|| &content[run..])
+/// True when a line (without its terminator) is a git conflict marker.
+pub fn is_marker_line(content: &str) -> bool {
+    classify(content).is_some()
+}
+
+/// The label after exactly `MARKER_LEN` marker bytes followed by the end of
+/// the line or a space — git's own marker shape. `None` otherwise.
+fn marker_label(content: &str, marker: u8) -> Option<&str> {
+    let bytes = content.as_bytes();
+    if bytes.len() < MARKER_LEN || !bytes[..MARKER_LEN].iter().all(|&byte| byte == marker) {
+        return None;
+    }
+    match bytes.get(MARKER_LEN) {
+        None => Some(""),
+        Some(b' ') => Some(content[MARKER_LEN + 1..].trim()),
+        Some(_) => None,
+    }
 }
 
 fn strip_terminator(line: &str) -> &str {
@@ -248,6 +309,24 @@ mod tests {
     const MARKER_LABELS: &str =
         "<<<<<<< HEAD\nlocal line\n=======\nremote line\n>>>>>>> feature/x\n";
 
+    const SETEXT_OUTSIDE: &str = "Title\n==========\n\
+         <<<<<<< ours\nlocal\n=======\nremote\n>>>>>>> theirs\n\
+         Sub\n=======\n";
+
+    const LOOSE_MARKERS_ARE_TEXT: &str = "<<<<<<<<<<\n<<<<<<<x\n>>>>>>>>\n\
+         <<<<<<< ours\nlocal\n=======\nremote\n>>>>>>> theirs\n";
+
+    // Real git 2.56 output: base `a b c d e`; ours `c d` → `Y1 shared`,
+    // theirs `c d` → `X1 shared`.
+    const DIFF3: &str = "a\nb\n<<<<<<< HEAD\nY1\nshared\n||||||| 00c6642\nc\nd\n\
+         =======\nX1\nshared\n>>>>>>> feature\ne\n";
+
+    const ZDIFF3: &str = "a\nb\n<<<<<<< HEAD\nY1\n||||||| 00c6642\nc\nd\n\
+         =======\nX1\n>>>>>>> feature\nshared\ne\n";
+
+    const MISPLACED_BASE: &str = "<<<<<<< ours\nlocal\n=======\nremote\n\
+         ||||||| base\n>>>>>>> theirs\n";
+
     fn only_conflict(file: &ConflictFile) -> &Conflict {
         assert_eq!(file.regions.len(), 1);
         match &file.regions[0] {
@@ -272,8 +351,9 @@ mod tests {
         assert_eq!(conflict.remote_text, "remote one\nremote two\n");
         assert_eq!(
             conflict.current_text,
-            "remote one\nremote two\nlocal one\nlocal two\n"
+            "local one\nlocal two\nremote one\nremote two\n"
         );
+        assert!(!conflict.resolved);
         assert_eq!(count_conflicts(&file), 1);
         assert!(file.ends_with_newline);
     }
@@ -331,10 +411,10 @@ mod tests {
         let conflict = only_conflict(&file);
         assert_eq!(conflict.local_text, "local line\r\n");
         assert_eq!(conflict.remote_text, "remote line\r\n");
-        assert_eq!(conflict.current_text, "remote line\r\nlocal line\r\n");
+        assert_eq!(conflict.current_text, "local line\r\nremote line\r\n");
         assert_eq!(conflict.local_label, "ours");
         assert!(file.ends_with_newline);
-        assert_eq!(render_resolved(&file), "remote line\r\nlocal line\r\n");
+        assert_eq!(render_resolved(&file), "local line\r\nremote line\r\n");
     }
 
     #[test]
@@ -342,7 +422,7 @@ mod tests {
         let file = parse(NO_TRAILING_NEWLINE).unwrap();
         assert!(!file.ends_with_newline);
         let rendered = render_resolved(&file);
-        assert_eq!(rendered, "remote line\nlocal line");
+        assert_eq!(rendered, "local line\nremote line");
         assert!(!rendered.ends_with('\n'));
     }
 
@@ -369,12 +449,108 @@ mod tests {
         assert_eq!(
             render_resolved(&file),
             "before line\n\
-             remote a\n\
              local a\n\
+             remote a\n\
              between line\n\
-             remote b\n\
              local b\n\
+             remote b\n\
              after line\n"
+        );
+    }
+
+    #[test]
+    fn setext_underlines_outside_conflicts_are_text() {
+        let file = parse(SETEXT_OUTSIDE).unwrap();
+        assert_eq!(count_conflicts(&file), 1);
+        assert_eq!(
+            file.regions[0],
+            Region::Text("Title\n==========\n".to_string())
+        );
+        assert_eq!(file.regions[2], Region::Text("Sub\n=======\n".to_string()));
+    }
+
+    #[test]
+    fn loose_marker_runs_are_text() {
+        let file = parse(LOOSE_MARKERS_ARE_TEXT).unwrap();
+        assert_eq!(count_conflicts(&file), 1);
+        assert_eq!(
+            file.regions[0],
+            Region::Text("<<<<<<<<<<\n<<<<<<<x\n>>>>>>>>\n".to_string())
+        );
+    }
+
+    #[test]
+    fn is_marker_line_matches_git_shapes() {
+        for line in [
+            "<<<<<<< HEAD",
+            "<<<<<<<",
+            "=======",
+            "||||||| base",
+            ">>>>>>> feature/x",
+        ] {
+            assert!(is_marker_line(line), "{line:?} is a marker");
+        }
+        for line in ["==========", "<<<<<<<x", "======= ", "<<<<<<", ""] {
+            assert!(!is_marker_line(line), "{line:?} is not a marker");
+        }
+    }
+
+    fn conflict_at(file: &ConflictFile, index: usize) -> &Conflict {
+        match &file.regions[index] {
+            Region::Conflict(conflict) => conflict,
+            Region::Text(text) => panic!("expected a conflict, found text: {text:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_diff3_dropping_base() {
+        let file = parse(DIFF3).unwrap();
+        assert_eq!(file.regions.len(), 3);
+        assert_eq!(file.regions[0], Region::Text("a\nb\n".to_string()));
+        let conflict = conflict_at(&file, 1);
+        assert_eq!(conflict.local_text, "Y1\nshared\n");
+        assert_eq!(conflict.remote_text, "X1\nshared\n");
+        assert_eq!(conflict.local_label, "HEAD");
+        assert_eq!(conflict.remote_label, "feature");
+        assert_eq!(file.regions[2], Region::Text("e\n".to_string()));
+    }
+
+    #[test]
+    fn parses_zdiff3_dropping_base() {
+        let file = parse(ZDIFF3).unwrap();
+        assert_eq!(file.regions.len(), 3);
+        let conflict = conflict_at(&file, 1);
+        assert_eq!(conflict.local_text, "Y1\n");
+        assert_eq!(conflict.remote_text, "X1\n");
+        assert_eq!(file.regions[2], Region::Text("shared\ne\n".to_string()));
+    }
+
+    #[test]
+    fn diff3_render_has_no_markers() {
+        for fixture in [DIFF3, ZDIFF3] {
+            let rendered = render_resolved(&parse(fixture).unwrap());
+            for line in rendered.split('\n') {
+                assert!(!marker_like(line), "marker line survived: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_misplaced_base_with_line() {
+        let error = parse(MISPLACED_BASE).unwrap_err();
+        assert_eq!(error.line, 5);
+        assert_eq!(error.kind, ParseErrorKind::MisplacedBase);
+    }
+
+    #[test]
+    fn line_ending_comes_from_open_marker() {
+        assert_eq!(
+            only_conflict(&parse(CRLF_SIDES).unwrap()).line_ending,
+            "\r\n"
+        );
+        assert_eq!(
+            only_conflict(&parse(ONE_CONFLICT_BASIC).unwrap()).line_ending,
+            "\n"
         );
     }
 }

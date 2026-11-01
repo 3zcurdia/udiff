@@ -9,8 +9,11 @@ design changes.
 ## Hard constraints
 
 - **Scope**: merge-conflict resolution only. Reject feature creep — "micro" is
-  the point. The crate currently has **zero dependencies**; keep it that way
-  unless a dependency is clearly unavoidable.
+  the point. The crate has exactly one dependency, `ratatui` (terminal I/O).
+  Add no others.
+- The one sanctioned non-conflict feature is Omarchy theme following
+  (`src/ui/theme/omarchy.rs`). Keep it, and don't treat it as precedent for
+  more.
 - **UI layout is fixed** (opendiff three-panel design):
 
   ```
@@ -30,6 +33,14 @@ design changes.
 
 ## Repo state
 
-- `src/main.rs` is the single entrypoint and is still a Hello-World placeholder;
-  real code does not exist yet. There is no test suite or CI. Add tests with the
-  standard `#[cfg(test)]` modules in `src/` as code lands.
+```
+src/main.rs        shell: argv, terminal lifecycle, event loop, file I/O, exit codes
+src/conflict.rs    pure: marker grammar, parse, render_resolved
+src/app.rs         pure: session state machine (selection, edits, save gate)
+src/git.rs         the only subprocess boundary (branch label, git add)
+src/ui/mod.rs      draw + key → Action translation
+src/ui/theme/      color roles; omarchy.rs follows the OS theme
+```
+
+Tests live in `#[cfg(test)]` modules in `src/` and in `tests/cli.rs`.
+`PLAN.md` tracks remaining work.

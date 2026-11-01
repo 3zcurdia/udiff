@@ -11,7 +11,7 @@ mod conflict;
 mod git;
 mod ui;
 
-use app::{App, Message, Outcome};
+use app::{App, Outcome};
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -27,12 +27,27 @@ usage: udiff <file> | udiff <remote> <local> <base> <merged>
 
 resolve git merge conflicts in one file: remote | local over current
 
-keys
-  n / p        next / previous conflict
-  r / l / b    take remote / local / both
-  Enter / i    edit the current text (Esc stops editing)
-  s            save the file and stage it
-  q            quit without saving
+Normal mode
+  n / p        next / previous conflict (stops at the ends)
+  r / l / b    take remote / local / both (both = local, then remote)
+  Enter / i    enter Edit mode
+  ↑ / ↓        scroll all panels one line
+  PgUp / PgDn  scroll all panels ten lines
+  ← / →        scroll all panels sideways
+  Home         scroll back to the selected conflict
+  s            save: refused while any conflict is unresolved; writes the
+               file, stages it (udiff <file> form), exits 0
+  q            quit without saving, exit 1 (press twice if there are edits)
+
+Edit mode
+  printable    insert at the cursor          Tab: insert a tab
+  Enter        newline
+  Backspace    delete before the cursor      Delete: delete at the cursor
+  arrows       move the cursor               Home / End: line start / end
+  Esc          back to Normal mode
+
+exit codes
+  0  saved   1  quit or error   2  usage   3  saved, but git add failed
 ";
 
 /// What the user asked for on the command line.
@@ -92,8 +107,9 @@ fn main() -> ExitCode {
             println!("udiff {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Ok(Invocation::File(path)) => finish(open_and_run(&path)),
-        Ok(Invocation::Mergetool { merged, .. }) => finish(open_and_run(&merged)),
+        Ok(Invocation::File(path)) => finish(open_and_run(&path, true)),
+        // git mergetool stages `$MERGED` itself after a zero exit.
+        Ok(Invocation::Mergetool { merged, .. }) => finish(open_and_run(&merged, false)),
         Err(()) => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -130,8 +146,8 @@ fn finish(result: Result<i32, String>) -> ExitCode {
 
 /// Reads the file (errors name the file, parse errors the line), refuses
 /// zero-conflict files, resolves the branch label, builds the session and
-/// runs it. Returns the process exit code.
-fn open_and_run(path: &Path) -> Result<i32, String> {
+/// runs it. `stage` runs `git add` after a save. Returns the process exit code.
+fn open_and_run(path: &Path, stage: bool) -> Result<i32, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("udiff: cannot read {}: {error}", path.display()))?;
     let file = conflict::parse(&text).map_err(|error| {
@@ -158,7 +174,10 @@ fn open_and_run(path: &Path) -> Result<i32, String> {
     loop {
         if redraw {
             terminal
-                .draw(|frame| ui::render(frame, &app, &theme))
+                .draw(|frame| {
+                    app.scroll = ui::clamp_scroll(&app, frame.area());
+                    ui::render(frame, &app, &theme)
+                })
                 .map_err(|error| format!("udiff: cannot draw: {error}"))?;
             redraw = false;
         }
@@ -185,25 +204,31 @@ fn open_and_run(path: &Path) -> Result<i32, String> {
                 // readable; nothing draws after this point.
                 drop(terminal);
                 drop(_guard);
-                save(&app.path, text)?;
-                if let Some(Message::Info(note)) = &app.message {
-                    println!("{note}");
-                }
-                return Ok(0);
+                return save(&app.path, &text, stage);
             }
-            Outcome::Quit { saved: _ } => return Ok(0),
+            Outcome::Quit => return Ok(1),
         }
     }
 }
 
-/// Writes the resolved text, then stages it. The write always happens first
-/// and is never lost; a staging failure only changes the exit code.
-fn save(path: &Path, text: String) -> Result<i32, String> {
-    std::fs::write(path, &text)
+/// Writes the resolved text, then stages it when `stage`. The write always
+/// happens first; a staging failure is a warning and exit code 3.
+fn save(path: &Path, text: &str, stage: bool) -> Result<i32, String> {
+    std::fs::write(path, text)
         .map_err(|error| format!("udiff: cannot write {}: {error}", path.display()))?;
+    if !stage {
+        println!("udiff: saved {}", path.display());
+        return Ok(0);
+    }
     match git::stage(path) {
-        Ok(()) => Ok(0),
-        Err(message) => Err(format!("warning: {message}")),
+        Ok(()) => {
+            println!("udiff: saved and staged {}", path.display());
+            Ok(0)
+        }
+        Err(message) => {
+            eprintln!("udiff: warning: {message}");
+            Ok(3)
+        }
     }
 }
 
@@ -212,8 +237,9 @@ fn parse_error_message(kind: &conflict::ParseErrorKind) -> &'static str {
     match kind {
         conflict::ParseErrorKind::MissingSeparator => "missing ======= separator",
         conflict::ParseErrorKind::MissingClose => "unclosed <<<<<<< conflict",
-        conflict::ParseErrorKind::MissingOpen => "======= or >>>>>>> outside a conflict",
+        conflict::ParseErrorKind::MissingOpen => ">>>>>>> outside a conflict",
         conflict::ParseErrorKind::NestedOpen => "<<<<<<< inside an open conflict",
+        conflict::ParseErrorKind::MisplacedBase => "||||||| outside the local side of a conflict",
     }
 }
 
@@ -270,6 +296,49 @@ mod tests {
         for flag in ["--version", "-V"] {
             let args = vec![flag.to_string()];
             assert_eq!(parse_args(&args), Ok(Invocation::Version), "{flag}");
+        }
+    }
+
+    /// A unique path under the system temp dir, outside any git repo.
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("udiff-main-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn save_without_stage_writes_and_exits_0() {
+        let path = temp_path("no-stage");
+        assert_eq!(save(&path, "x\n", false), Ok(0));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\n");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn save_with_failed_stage_exits_3() {
+        let path = temp_path("failed-stage");
+        assert_eq!(save(&path, "x\n", true), Ok(3));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\n");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn save_to_unwritable_path_errors() {
+        let path = std::env::temp_dir().join("udiff-missing-dir/x");
+        assert!(save(&path, "x\n", false).is_err());
+    }
+
+    #[test]
+    fn help_lists_every_key() {
+        for needle in [
+            "n / p",
+            "r / l / b",
+            "Enter / i",
+            "PgUp",
+            "Home",
+            "Tab",
+            "Esc",
+            "exit codes",
+        ] {
+            assert!(HELP.contains(needle), "--help mentions {needle:?}");
         }
     }
 }

@@ -43,3 +43,13 @@ Status values: `draft` → `approved` → `building` → `done`.
 | File | Status | Summary |
 | --- | --- | --- |
 | `000-project-setup.md` | draft | Project setup and v1 build spec: the ratatui scaffold, marker parser, session state machine, three-panel TUI, save-and-stage flow, git mergetool entry, and the OS-followed theme — the complete micro binary. |
+| `001-safe-quit-and-exit-codes.md` | done | `q` exits 1 and asks twice on edits; exit codes 0/1/2/3; mergetool form leaves staging to git. |
+| `002-strict-marker-grammar.md` | done | git's exact marker shape (setext underlines are text) and diff3/zdiff3 support with the base dropped. |
+| `003-unresolved-save-gate.md` | done | Per-conflict `resolved` flag; save refused while any conflict is unresolved; `b` = local then remote. |
+| `004-editing-correctness.md` | done | One line model for edits (trailing newline, CRLF), real tabs drawn at 4-column stops, Home/End in Edit mode. |
+| `005-synchronized-scrolling.md` | done | Shared vertical and horizontal scroll for all three panels, clamped before every draw. |
+| `006-omarchy-theme-official.md` | building | Omarchy theme following documented in README and sanctioned in AGENTS.md; waits on the owner's live-switch check. |
+| `007-docs-help-cli-tests-ci.md` | done | AGENTS.md module map, full `--help` and README keymap, `tests/cli.rs`, GitHub Actions CI. |
+
+Features 001–007 were split from `PLAN.md` (2026-10-31) after it was built on
+branch `complete-plan`.
