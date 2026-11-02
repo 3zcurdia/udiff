@@ -1,9 +1,11 @@
 //! OS-theme (Omarchy) follow — the only module that reads theme files.
 //!
-//! The active `colors.toml` is re-read only when its mtime changes; a missing
-//! or unreadable theme falls back silently to the built-in palette.
+//! The active `colors.toml` is re-read only when its mtime changes. A theme
+//! that goes away — directory removed, file removed, file unreadable — switches
+//! to the built-in palette on the next check, once; a theme that never existed
+//! keeps returning `None` so the caller starts on the built-in palette.
 
-use super::{Theme, map_palette, parse_color};
+use super::{Theme, default_theme, map_palette, parse_color};
 use ratatui::style::Color;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -104,7 +106,8 @@ impl OmarchyWatch {
     }
 
     /// `Some(theme)` only when the palette actually changed since the last
-    /// call (the first call is the initial load), `None` otherwise.
+    /// call (the first call is the initial load), `None` otherwise. A change
+    /// that leaves no readable `colors.toml` returns the built-in theme once.
     pub fn check(&mut self) -> Option<Theme> {
         let path = theme_dir().map(|directory| directory.join("colors.toml"));
         let mtime = path
@@ -120,7 +123,7 @@ impl OmarchyWatch {
             .map(|text| map_palette(&parse_colors_toml(&text)));
         self.path = path;
         self.mtime = mtime;
-        theme
+        Some(theme.unwrap_or_else(default_theme))
     }
 }
 
@@ -279,6 +282,55 @@ mod tests {
             "the legacy-only palette falls back to the built-in roles"
         );
         assert!(watch.check().is_none(), "only a change returns Some");
+
+        drop(_guard);
+        fs::remove_dir_all(&directory).expect("remove the temp theme dir");
+    }
+
+    #[test]
+    fn check_reverts_to_builtin_when_theme_disappears() {
+        let _lock = lock_env();
+        let directory = temp_theme_dir();
+        let colors = directory.join("colors.toml");
+        fs::write(&colors, OMARCHY_COLORS_TOML).expect("write colors.toml");
+        let _guard = EnvGuard::set(&directory);
+
+        let mut watch = OmarchyWatch::new();
+        let loaded = watch.check().expect("the theme loads");
+        assert_ne!(
+            loaded,
+            super::super::default_theme(),
+            "not the built-in palette"
+        );
+
+        fs::remove_file(&colors).expect("remove colors.toml");
+        let reverted = watch.check().expect("the removal is reported once");
+        assert_eq!(
+            reverted,
+            super::super::default_theme(),
+            "a theme that goes away falls back to the built-in palette"
+        );
+        assert!(
+            watch.check().is_none(),
+            "the fallback is reported exactly once"
+        );
+
+        drop(_guard);
+        fs::remove_dir_all(&directory).expect("remove the temp theme dir");
+    }
+
+    #[test]
+    fn check_without_theme_returns_none_first() {
+        let _lock = lock_env();
+        let directory = temp_theme_dir();
+        let _guard = EnvGuard::set(&directory);
+        assert!(!directory.join("colors.toml").exists(), "no theme to load");
+
+        let mut watch = OmarchyWatch::new();
+        assert!(
+            watch.check().is_none(),
+            "no theme at startup: the caller uses the built-in palette"
+        );
 
         drop(_guard);
         fs::remove_dir_all(&directory).expect("remove the temp theme dir");

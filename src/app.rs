@@ -624,6 +624,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_resolution_saves_no_line() {
+        let mut app = app_over("before\n<<<<<<< ours\n=======\nx\n>>>>>>> theirs\nafter\n");
+        app.dispatch(Action::TakeLocal);
+        assert_eq!(
+            app.dispatch(Action::Save),
+            Outcome::SaveRequested {
+                text: "before\nafter\n".to_string()
+            },
+            "the placeholder line is display-only"
+        );
+    }
+
+    #[test]
     fn dirty_flag_set_on_first_edit() {
         let mut app = app_over(ONE_CONFLICT_BASIC);
         assert!(!app.dirty);

@@ -13,6 +13,7 @@ use ratatui::layout::{Constraint, Direction as LayoutDirection, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
+use std::ops::Range;
 use theme::{Role, Theme};
 
 /// Below 60x12 cells the panels are dropped and the status line says why.
@@ -103,6 +104,12 @@ fn follow(pos: usize, start: usize, size: usize) -> usize {
     } else {
         start
     }
+}
+
+/// The line indices drawn this frame: the `rows` lines that fit starting at
+/// `top`, clamped to the document. Empty when the document or the panel is.
+fn visible_range(top: usize, rows: usize, len: usize) -> Range<usize> {
+    top.min(len)..(top + rows).min(len)
 }
 
 /// Pure key → `Action` mapping per the keymap. In Edit mode printable keys
@@ -282,10 +289,13 @@ fn draw_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, panel: Pa
         None
     };
 
+    let range = visible_range(top, rows, document.lines.len());
     let lines: Vec<Line> = document
         .lines
         .iter()
         .enumerate()
+        .skip(range.start)
+        .take(range.len())
         .map(|(index, text)| {
             let mut style = Style::default();
             let region = document.line_region.get(index).copied().flatten();
@@ -313,10 +323,9 @@ fn draw_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, panel: Pa
         .collect();
 
     frame.render_widget(
-        Paragraph::new(lines).block(block).scroll((
-            top.min(u16::MAX as usize) as u16,
-            x.min(u16::MAX as usize) as u16,
-        )),
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((0, x.min(u16::MAX as usize) as u16)),
         area,
     );
 }
@@ -340,11 +349,17 @@ fn panel_document(app: &App, panel: Panel) -> PanelDocument {
         let start = newlines;
         let piece: &str = match region {
             Region::Text(text) => text,
-            Region::Conflict(conflict) => match panel {
-                Panel::Remote => &conflict.remote_text,
-                Panel::Local => &conflict.local_text,
-                Panel::Current => &conflict.current_text,
-            },
+            Region::Conflict(conflict) => {
+                let side = match panel {
+                    Panel::Remote => &conflict.remote_text,
+                    Panel::Local => &conflict.local_text,
+                    Panel::Current => &conflict.current_text,
+                };
+                // An empty side or resolution still owns one display line, so
+                // the conflict has a row to select, highlight and edit into.
+                // Display-only: `render_resolved` reads `current_text`.
+                if side.is_empty() { "\n" } else { side }
+            }
         };
         newlines += piece.matches('\n').count();
         let end = newlines + usize::from(!piece.is_empty() && !piece.ends_with('\n'));
@@ -444,6 +459,8 @@ fn caret_line(text: &str, column: usize, style: Style) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
@@ -519,6 +536,164 @@ mod tests {
         assert_eq!(
             translate_key(key(KeyCode::Home), Mode::Normal),
             Action::ScrollReset
+        );
+    }
+
+    const EMPTY_SIDES_MIDDLE: &str = "before\n<<<<<<< ours\n=======\n>>>>>>> theirs\nafter\n";
+    const EMPTY_SIDES_AT_END: &str = "before\n<<<<<<< ours\n=======\n>>>>>>> theirs\n";
+
+    /// 70,000 plain lines and then one conflict — a file whose conflict sits
+    /// far past the old `u16` vertical-scroll limit.
+    fn huge_prefix_conflict() -> String {
+        let mut text = String::new();
+        for number in 0..70_000 {
+            text.push_str(&format!("text {number}\n"));
+        }
+        text.push_str("<<<<<<< ours\nLOCAL-MARK\n=======\nREMOTE-MARK\n>>>>>>> theirs\n");
+        text
+    }
+
+    /// Draws one frame on an 80x24 test screen exactly the way `main` does
+    /// (clamp the scroll, then render) and returns the buffer as text — one
+    /// row per line — plus the raw buffer for cell-level checks.
+    fn screen(app: &mut App) -> (String, Buffer) {
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).expect("test screen");
+        terminal
+            .draw(|frame| {
+                app.scroll = clamp_scroll(app, frame.area());
+                render(frame, app, &theme::default_theme());
+            })
+            .expect("draw one frame");
+        let buffer = terminal.backend().buffer().clone();
+        let area = buffer.area();
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect()
+            })
+            .collect();
+        (rows.join("\n"), buffer)
+    }
+
+    fn app_over_text(text: &str) -> App {
+        App::new(
+            std::path::PathBuf::from("conflicted.txt"),
+            crate::conflict::parse(text).expect("fixture must parse"),
+            None,
+        )
+    }
+
+    #[test]
+    fn visible_range_cases() {
+        assert_eq!(visible_range(0, 20, 100), 0..20);
+        assert_eq!(visible_range(90, 20, 100), 90..100);
+        assert_eq!(visible_range(5, 20, 3), 3..3);
+        assert_eq!(visible_range(0, 0, 10), 0..0);
+    }
+
+    #[test]
+    fn render_shows_conflict_past_line_65535() {
+        let text = huge_prefix_conflict();
+        let mut app = app_over_text(&text);
+        let (screen, _) = screen(&mut app);
+        assert!(
+            screen.contains("REMOTE-MARK"),
+            "the remote side of the conflict past line 65535 is drawn"
+        );
+        assert!(
+            screen.contains("LOCAL-MARK"),
+            "the local side of the conflict past line 65535 is drawn"
+        );
+    }
+
+    #[test]
+    fn scroll_still_clamps_after_slicing() {
+        let remote: String = (0..30).map(|line| format!("remote {line}\n")).collect();
+        let text = format!("<<<<<<< ours\nlocal\n=======\n{remote}>>>>>>> theirs\n");
+        let mut app = app_over_text(&text);
+
+        app.scroll = (1000, 0);
+        let (scrolled_down, _) = screen(&mut app);
+        assert!(
+            scrolled_down.contains("remote 29"),
+            "the last remote line is visible at the bottom clamp"
+        );
+
+        app.scroll = (-1000, 0);
+        let (scrolled_up, _) = screen(&mut app);
+        assert!(
+            scrolled_up.contains("local"),
+            "the first conflict line is visible at the top clamp"
+        );
+    }
+
+    /// First row of `area` whose drawn text contains `needle`.
+    fn row_containing(screen: &str, area: Rect, needle: &str) -> u16 {
+        let rows: Vec<&str> = screen.lines().collect();
+        (area.y..area.y + area.height)
+            .find(|&y| rows.get(y as usize).is_some_and(|row| row.contains(needle)))
+            .unwrap_or_else(|| panic!("{needle:?} is not drawn inside {area:?}"))
+    }
+
+    /// Every cell of `area` drawn with `modifier`.
+    fn cells_with(buffer: &Buffer, area: Rect, modifier: Modifier) -> Vec<(u16, u16)> {
+        let mut found = Vec::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if buffer[(x, y)].style().add_modifier.contains(modifier) {
+                    found.push((x, y));
+                }
+            }
+        }
+        found
+    }
+
+    /// The current panel's area on the standard 80x24 test screen.
+    fn current_panel() -> Rect {
+        panel_areas(Rect::new(0, 0, 80, 24))[2]
+    }
+
+    #[test]
+    fn empty_side_gets_one_placeholder_line() {
+        let app = app_over_text(EMPTY_SIDES_MIDDLE);
+        for panel in [Panel::Remote, Panel::Local, Panel::Current] {
+            let document = panel_document(&app, panel);
+            assert_eq!(document.lines, ["before", "", "after"], "{panel:?}");
+            assert_eq!(document.line_region[1], Some(1), "{panel:?}");
+            assert_eq!(document.selected_start, 1, "{panel:?}");
+        }
+    }
+
+    #[test]
+    fn empty_resolution_caret_sits_inside_conflict() {
+        let mut app = app_over_text(EMPTY_SIDES_MIDDLE);
+        app.dispatch(Action::TakeLocal);
+        app.dispatch(Action::EnterEdit);
+        let (screen, buffer) = screen(&mut app);
+        let panel = current_panel();
+        let carets = cells_with(&buffer, panel, Modifier::REVERSED);
+        assert_eq!(carets.len(), 1, "one caret cell; screen:\n{screen}");
+        let before = row_containing(&screen, panel, "before");
+        let after = row_containing(&screen, panel, "after");
+        assert!(
+            before < carets[0].1 && carets[0].1 < after,
+            "the caret sits on the placeholder between rows {before} and {after}, got {:?}; screen:\n{screen}",
+            carets[0]
+        );
+    }
+
+    #[test]
+    fn empty_resolution_caret_at_end_of_file() {
+        let mut app = app_over_text(EMPTY_SIDES_AT_END);
+        app.dispatch(Action::TakeLocal);
+        app.dispatch(Action::EnterEdit);
+        let (screen, buffer) = screen(&mut app);
+        let carets = cells_with(&buffer, current_panel(), Modifier::REVERSED);
+        assert_eq!(
+            carets.len(),
+            1,
+            "exactly one caret cell in the current panel; screen:\n{screen}"
         );
     }
 

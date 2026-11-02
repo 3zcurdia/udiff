@@ -6,7 +6,7 @@ and 10. The speed findings are planned separately in
 009-render-performance.md, which builds on this doc: build 008 first.
 -->
 
-**Status:** draft
+**Status:** done
 **Author:** plan agent (from the 2026-11-02 code review), approval pending (luis)
 **Date:** 2026-11-02
 **Architecture version:** commit 4fe21a7 of `.opencode/docs/architecture.md`
@@ -419,19 +419,19 @@ smoothly.
 
 ## 6. Verification checklist
 
-- [ ] Every file in §2 exists at the exact path written there
-- [ ] Every test in §4 exists with the exact name and passes
-- [ ] `cargo clippy --all-targets -- -D warnings` reports no errors
-- [ ] `cargo check --all-targets` exits zero
-- [ ] Every acceptance criterion in §1.4 is referenced by a passing test or the
+- [x] Every file in §2 exists at the exact path written there
+- [x] Every test in §4 exists with the exact name and passes
+- [x] `cargo clippy --all-targets -- -D warnings` reports no errors
+- [x] `cargo check --all-targets` exits zero
+- [x] Every acceptance criterion in §1.4 is referenced by a passing test or the
       command named for it
-- [ ] `grep -rn "Command::new" src/ | grep -v 'src/git.rs'` returns nothing
+- [x] `grep -rn "Command::new" src/ | grep -v 'src/git.rs'` returns nothing
       (architecture.md §5 rule 4; grep narrowed per 000 D1)
-- [ ] `cargo tree --depth 1` lists no dependency besides `ratatui`
+- [x] `cargo tree --depth 1` lists no dependency besides `ratatui`
       (architecture.md §5 rule 1)
-- [ ] `grep -n "std::fs::write" src/main.rs` returns nothing outside
+- [x] `grep -n "std::fs::write" src/main.rs` returns nothing outside
       `#[cfg(test)]`
-- [ ] `architecture.md` updated if any name, table or rule changed
+- [x] `architecture.md` updated if any name, table or rule changed
 
 ---
 
@@ -440,7 +440,7 @@ Filled by the builder.
 
 | # | Plan section | Plan said | Built instead |
 | --- | --- | --- | --- |
-| D1 | | | |
+| D1 | §5 Build order, the `Commit:` line under each step | Commit each step as `008 B1: …` / `008 B2: …` / `008 B3: …` / `008 B4: …` | The four steps were built and verified but left uncommitted: the `implement-feature` skill that executes this doc ends with "Do not commit or push unless the user asks", and the owner did not ask. The tree holds exactly the changes for B1–B4; the four commit messages from §5 can be applied verbatim. |
 
 ---
 
@@ -449,9 +449,16 @@ Filled by the builder, one entry per deviation in §7.
 
 ```
 D1
-  Cause:
-  Evidence:
-  Why the plan missed it:
-  Fix applied:
-  Follow-up:
+  Cause: user-decision
+  Evidence: implement-feature skill, close-out rule — "Do not commit or push
+    unless the user asks." The user's request was to execute the doc and close
+    it out; it named no commits.
+  Why the plan missed it: §5 writes a `Commit:` line per step for a builder
+    that commits as it goes, while the skill that runs §5 forbids committing
+    without an explicit ask. Neither document references the other.
+  Fix applied: every step was executed and verified without committing;
+    `git status` shows only the B1–B4 changes plus this doc, so the four
+    messages in §5 still apply one-to-one.
+  Follow-up: if the owner wants the step history, run the four `Commit:`
+    lines from §5 in order; no code or doc change is needed either way.
 ```

@@ -432,9 +432,6 @@ Real git output for a CRLF conflict (the markers are CRLF too):
     over `edit_lines(text)`.
 - In `ui/mod.rs` `panel_document`, strip one trailing `\r` from every display
   line.
-- Known, accepted edge: an empty resolution in Edit mode draws its caret on
-  the line after the conflict. A resolution that is exactly one empty line
-  can't be produced by editing.
 
 **Tests:**
 - app.rs `starts_on_first_conflict`: cursor becomes `(3, 10)`, the end of

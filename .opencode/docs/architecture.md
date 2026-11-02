@@ -56,6 +56,14 @@ Build note (2026-10-31): features 001–007 (split from `PLAN.md`, branch
 marker grammar with diff3/zdiff3, the unresolved save gate, the editing line
 model, synchronized scrolling, `tests/cli.rs` and CI — 67 unit tests plus 6
 CLI tests.
+Build note (2026-11-02): feature 008 (`features/008-review-bug-fixes.md`)
+fixed the four defects from the code review of commit 21312ae: panels draw
+only the visible lines (no `u16` vertical limit), an empty conflict side or
+resolution shows one placeholder line (display-only, so the caret lands
+inside the conflict), a removed Omarchy theme reverts to the built-in palette
+on the next check, and saves go through a sibling temp file plus a rename —
+permission bits kept, symlink preserved, target never truncated. 80 unit tests
+plus 6 CLI tests.
 
 ### 1.1 Monetization
 
@@ -175,7 +183,8 @@ where a thing lives.
   `git branch --show-current`, falling back to `git rev-parse --short HEAD` when
   detached (mid-rebase); any failure falls back to the literal marker label.
   The remote label is always the marker label verbatim.
-- Staging — `git add -- <file>` after a successful write, in the
+- Staging — `git add -- <file>` after a successful atomic write (temp file +
+  rename), in the
   `udiff <file>` form only; in the mergetool form git stages `$MERGED` itself
   after exit 0. The only write-side git call in the project.
 
@@ -295,7 +304,8 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
   mapped onto the roles with a contrast-distance guard; the theme directory's
   `colors.toml` mtime is compared once per second and a redraw happens only on
   actual change; missing or unreadable → built-in fallback palette on
-  `Color::Reset` + named colors. **Banned shortcut:** `Color::Rgb`,
+  `Color::Reset` + named colors, and a theme that goes away while udiff runs
+  switches to the built-in palette on the next check. **Banned shortcut:** `Color::Rgb`,
   `Color::new` or hex literals outside `src/ui/theme/`. Bold is reserved for
   the active panel border and the current-conflict highlight.
 - **State handling:** per surface —

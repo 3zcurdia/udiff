@@ -109,3 +109,6 @@ itself — git stages the file after udiff exits 0.
   time changes).
 - `UDIFF_OMARCHY_DIR=<dir>` overrides the location. A directory without a
   `colors.toml` forces the built-in palette — that is how to turn it off.
+- A theme that goes away while udiff runs (its `colors.toml` or its directory
+  removed, or the file becoming unreadable) switches to the built-in palette on
+  the next check, once.

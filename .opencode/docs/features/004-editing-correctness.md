@@ -70,9 +70,6 @@ visitor: not applicable.
 - Converting line endings or tabs.
 - Unicode grapheme-aware cursor movement (columns count `char`s; exact for
   ASCII).
-- Known, accepted edge: an empty resolution in Edit mode draws its caret on
-  the line after the conflict, and a resolution that is exactly one empty line
-  cannot be produced by editing.
 
 ### 1.6 Open questions resolved
 

@@ -2,7 +2,8 @@
 //! Everything it does is glue around the pure core — no parsing, no state
 //! machine, no drawing decisions.
 
-use std::io;
+use std::ffi::OsString;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -214,7 +215,7 @@ fn open_and_run(path: &Path, stage: bool) -> Result<i32, String> {
 /// Writes the resolved text, then stages it when `stage`. The write always
 /// happens first; a staging failure is a warning and exit code 3.
 fn save(path: &Path, text: &str, stage: bool) -> Result<i32, String> {
-    std::fs::write(path, text)
+    write_atomically(path, text)
         .map_err(|error| format!("udiff: cannot write {}: {error}", path.display()))?;
     if !stage {
         println!("udiff: saved {}", path.display());
@@ -230,6 +231,39 @@ fn save(path: &Path, text: &str, stage: bool) -> Result<i32, String> {
             Ok(3)
         }
     }
+}
+
+/// Writes `text` to `path` through a sibling temp file
+/// (`.<file name>.udiff-<pid>.tmp`) and renames it over the target, so the
+/// target file itself is touched only by the rename: a crash, a kill or a full
+/// disk leaves either the old file or the new one, never a truncated one. The
+/// temp file inherits the target's permission bits; symlinks are followed, so
+/// the link itself is preserved. On any error the temp file is removed
+/// best-effort and the original file is left byte-identical.
+fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
+    // Follow symlinks first: the rename must replace the real file, not the link.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file path"))?;
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".udiff-{}.tmp", std::process::id()));
+    let temp = target.with_file_name(temp_name);
+
+    let written = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(text.as_bytes())?;
+        if let Ok(metadata) = std::fs::metadata(&target) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp, &target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
 }
 
 /// Fixed one-line wording for each parse failure — never the file's contents.
@@ -324,6 +358,110 @@ mod tests {
     fn save_to_unwritable_path_errors() {
         let path = std::env::temp_dir().join("udiff-missing-dir/x");
         assert!(save(&path, "x\n", false).is_err());
+    }
+
+    /// A directory of its own under the system temp dir, so the test can see
+    /// every file a save leaves behind.
+    fn temp_dir(name: &str) -> PathBuf {
+        let directory = temp_path(name);
+        std::fs::create_dir_all(&directory).expect("create the temp dir");
+        directory
+    }
+
+    #[test]
+    fn save_leaves_no_temp_file() {
+        let directory = temp_dir("atomic");
+        let path = directory.join("resolved.txt");
+        assert_eq!(save(&path, "x\n", false), Ok(0));
+        let entries: Vec<_> = std::fs::read_dir(&directory)
+            .expect("read the temp dir")
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the saved file, no temp file left behind"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read it back"), "x\n");
+        std::fs::remove_dir_all(&directory).expect("remove the temp dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = temp_dir("perm");
+        let path = directory.join("resolved.txt");
+        std::fs::write(&path, "orig\n").expect("seed the file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("set 0755");
+        assert_eq!(save(&path, "x\n", false), Ok(0));
+        let mode = std::fs::metadata(&path)
+            .expect("stat the saved file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the permission bits survive the save");
+        std::fs::remove_dir_all(&directory).expect("remove the temp dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_through_symlink_keeps_link() {
+        use std::os::unix::fs::symlink;
+        let directory = temp_dir("symlink");
+        let real = directory.join("real.txt");
+        let link = directory.join("link.txt");
+        std::fs::write(&real, "orig\n").expect("seed the real file");
+        symlink(&real, &link).expect("link the real file");
+        assert_eq!(save(&link, "x\n", false), Ok(0));
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("stat the link")
+                .file_type()
+                .is_symlink(),
+            "the path is still a symlink"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real).expect("read the real file"),
+            "x\n",
+            "the target holds the resolved text"
+        );
+        std::fs::remove_dir_all(&directory).expect("remove the temp dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_save_leaves_original() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = temp_dir("readonly");
+        let path = directory.join("resolved.txt");
+        std::fs::write(&path, "orig\n").expect("seed the file");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555))
+            .expect("make the directory read-only");
+
+        // Root ignores the mode bits: a successful probe create means the
+        // chmod had no effect, so there is nothing to assert here.
+        if std::fs::File::create(directory.join("probe")).is_ok() {
+            std::fs::remove_file(directory.join("probe")).expect("remove the probe");
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+                .expect("restore the directory");
+            std::fs::remove_dir_all(&directory).expect("remove the temp dir");
+            return;
+        }
+
+        let error = save(&path, "x\n", false).expect_err("the save must fail");
+        assert!(
+            error.starts_with("udiff: cannot write"),
+            "the error names the write, got: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read the original"),
+            "orig\n",
+            "the original file is byte-identical"
+        );
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the directory");
+        std::fs::remove_dir_all(&directory).expect("remove the temp dir");
     }
 
     #[test]
