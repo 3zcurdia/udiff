@@ -64,6 +64,17 @@ inside the conflict), a removed Omarchy theme reverts to the built-in palette
 on the next check, and saves go through a sibling temp file plus a rename —
 permission bits kept, symlink preserved, target never truncated. 80 unit tests
 plus 6 CLI tests.
+Build note (2026-11-03): feature 009 (`features/009-render-performance.md`)
+removed the per-frame whole-file work from the same review: each frame builds
+its three panel documents once, as borrowed line slices shared by the scroll
+clamp and the draw (one pass, no per-line allocation); the widest line is
+cached against `App::revision` and re-measured only when a resolution changes;
+unbound keys and non-resize events draw nothing; cursor moves borrow the lines
+instead of copying them; the n-th conflict is an index into
+`App::conflict_regions`, not a scan; and the startup `git` branch lookup runs
+only when some conflict's local label is `HEAD` or empty. A 100,000-line frame
+went from 62309 µs to 3504 µs in a release build (17.8×). 89 unit tests plus 6
+CLI tests.
 
 ### 1.1 Monetization
 
@@ -94,7 +105,9 @@ plus 6 CLI tests.
   `cargo test` on every push and pull request.
 - **Lint and formatting:** `cargo clippy --all-targets -- -D warnings` and
   `cargo fmt`, both with defaults. No custom rules, no `clippy.toml`, no
-  `rustfmt.toml`.
+  `rustfmt.toml`. The defaults are part of the contract: clippy's
+  `too_many_arguments` caps a function at 7 arguments, so a planned signature
+  has to fit that cap before it is written.
 - **Deploy target:** one native binary (`target/release/udiff`) for macOS and
   Linux. Windows is not targeted and not tested.
 
@@ -156,13 +169,18 @@ where a thing lives.
 
 ### Session — `src/app.rs`
 
-- `App` — `path: PathBuf`, `file: ConflictFile`, `selected: usize` (0-based
+- `App` — `path: PathBuf`, `file: ConflictFile`, `conflict_regions: Vec<usize>`
+  (region index of each conflict, in document order, built once — regions never
+  change shape after parse), `selected: usize` (0-based
   internally, displayed 1-based), `cursor: (usize, usize)` (line, column inside
   the selected conflict's `current_text`), `mode: Mode`, `dirty: bool`,
   `message: Option<Message>`, `local_branch: Option<String>` (resolved once at
-  startup), `quit_armed: bool` (a `q` on a dirty session arms it; the next `q`
-  quits) and `scroll: (isize, usize)` (shared panel offset, clamped by
-  `ui::clamp_scroll` before every draw). One per process. States: `clean` /
+  startup, and only when some conflict's local label needs it), `quit_armed:
+  bool` (a `q` on a dirty session arms it; the next `q`
+  quits), `scroll: (isize, usize)` (shared panel offset, clamped by
+  `ui::clamp_scroll` before every draw) and `revision: u64` (bumped whenever
+  any `current_text` changes, so the shell re-measures the widest line only
+  then). One per process. States: `clean` /
   `dirty`.
 - `Mode` — `Normal` or `Edit`. In `Normal` the single-key commands run; in
   `Edit` every printable key is text.
@@ -171,6 +189,8 @@ where a thing lives.
 - `Action` — the user intent of one key event (`NextConflict`, `TakeRemote`,
   `Save`, `Scroll { down, right }`, `ScrollReset`, `MoveCursor(Direction)`, …),
   produced by `ui::translate_key` and consumed by `App::dispatch`.
+  `Action::Ignored` changes nothing — not even the status message — so the
+  shell turns it into no redraw.
 - `Outcome` — `Outcome::Continue`, `Outcome::SaveRequested { text: String }`, or
   `Outcome::Quit`; the only way the pure core tells the shell to do I/O.
 - Save gate — `s` is refused while `conflict::count_unresolved > 0` (selection
@@ -182,7 +202,9 @@ where a thing lives.
 - Branch label resolution — a marker label of `HEAD` or empty is resolved via
   `git branch --show-current`, falling back to `git rev-parse --short HEAD` when
   detached (mid-rebase); any failure falls back to the literal marker label.
-  The remote label is always the marker label verbatim.
+  The lookup runs only when a conflict's local label is `HEAD` or empty
+  (`git::label_needs_branch`), because any other label is never shown through
+  it. The remote label is always the marker label verbatim.
 - Staging — `git add -- <file>` after a successful atomic write (temp file +
   rename), in the
   `udiff <file>` form only; in the mergetool form git stages `$MERGED` itself
@@ -245,7 +267,8 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
 3. **The marker file is the source of truth.** Panel content and branch labels
    come from the conflicted file's marker blocks; git temp files are never read.
    Prevents two diverging renderings of "the sides".
-4. **Exactly two git calls.** Read-only label resolution at startup
+4. **Exactly two git calls.** Read-only label resolution at startup, only when
+   a conflict's local label is `HEAD` or empty
    (`git branch --show-current`, then `git rev-parse --short HEAD`) and
    `git add -- <file>` on save — both in `src/git.rs`; no other product code
    in `src/` ever execs (`tests/cli.rs` runs the udiff binary itself, which is
@@ -287,9 +310,11 @@ Source: the product and engineering interviews of 2026-10-30 (recorded in
 
 ## 6. Interface conventions
 
-- **Rendering strategy: one screen, immediate-mode redraw on each input event.**
-  The narrow exception: the event poll uses a 1-second timeout so the theme can
-  be re-checked; a timeout redraws only when the theme actually changed.
+- **Rendering strategy: one screen, immediate-mode redraw on key events that
+  map to an action, on resize, plus a theme-change redraw.** Unbound keys and
+  other events (focus, mouse, paste) draw nothing. The event poll uses a
+  1-second timeout so the theme can be re-checked; a timeout redraws only when
+  the theme actually changed.
 - **Component library:** ratatui primitives only (`Frame`, `Layout`, `Block`,
   `Paragraph`). A widget may not name a raw color — it asks the `Theme` for a
   role. No custom widget crates.

@@ -51,7 +51,7 @@ Status values: `draft` → `approved` → `building` → `done`.
 | `006-omarchy-theme-official.md` | building | Omarchy theme following documented in README and sanctioned in AGENTS.md; waits on the owner's live-switch check. |
 | `007-docs-help-cli-tests-ci.md` | done | AGENTS.md module map, full `--help` and README keymap, `tests/cli.rs`, GitHub Actions CI. |
 | `008-review-bug-fixes.md` | done | 2026-11-02 review fixes: no u16 scroll limit (draw only visible lines), placeholder line for empty conflict sides, Omarchy theme removal reverts to built-in, atomic save. |
-| `009-render-performance.md` | draft | 2026-11-02 review speed-ups (after 008): one borrowed panel build per frame, widest-line cache, redraw only on real actions/resize, O(1) conflict lookup, git branch lookup only for HEAD labels. |
+| `009-render-performance.md` | done | 2026-11-02 review speed-ups (after 008): one borrowed panel build per frame, widest-line cache, redraw only on real actions/resize, O(1) conflict lookup, git branch lookup only for HEAD labels. |
 
 Features 001–007 were split from `PLAN.md` (2026-10-31) after it was built on
 branch `complete-plan`.

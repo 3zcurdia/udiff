@@ -7,7 +7,7 @@ From the /code-review audit of commit 21312ae (2026-11-02), findings 2, 3, 4,
 the rest of the per-frame whole-file work.
 -->
 
-**Status:** building
+**Status:** done
 **Author:** plan agent (from the 2026-11-02 code review), approval pending (luis)
 **Date:** 2026-11-02
 **Architecture version:** commit 4fe21a7 of `.opencode/docs/architecture.md`
@@ -454,18 +454,19 @@ Precondition: 008 is `done`.
 
 ## 6. Verification checklist
 
-- [ ] Every file in §2 exists at the exact path written there
-- [ ] Every test in §4 exists with the exact name and passes
-- [ ] `cargo clippy --all-targets -- -D warnings` reports no errors
-- [ ] `cargo check --all-targets` exits zero
-- [ ] Every acceptance criterion in §1.4 is referenced by a passing test or the
+- [x] Every file in §2 exists at the exact path written there
+- [x] Every test in §4 exists with the exact name and passes
+- [x] `cargo clippy --all-targets -- -D warnings` reports no errors
+- [x] `cargo check --all-targets` exits zero
+- [x] Every acceptance criterion in §1.4 is referenced by a passing test or the
       command named for it
-- [ ] `grep -rn "Command::new" src/ | grep -v 'src/git.rs'` returns nothing
+- [x] `grep -rn "Command::new" src/ | grep -v 'src/git.rs'` returns nothing
       (architecture.md §5 rule 4; grep narrowed per 000 D1)
-- [ ] `cargo tree --depth 1` lists no dependency besides `ratatui`
+- [x] `cargo tree --depth 1` lists no dependency besides `ratatui`
       (architecture.md §5 rule 1)
-- [ ] Baseline and after timings are recorded in §7, and after ≤ baseline / 10
-- [ ] `architecture.md` updated if any name, table or rule changed
+- [x] Baseline and after timings are recorded in §7, and after ≤ baseline / 10
+      (62309 µs → 3504 µs = 17.8×)
+- [x] `architecture.md` updated if any name, table or rule changed
 
 ---
 
@@ -473,11 +474,16 @@ Precondition: 008 is `done`.
 Filled by the builder. Record the timings here as well:
 
 - Baseline (build step 1): `avg frame: 62309 µs` (release, 100,000 lines, 120×40)
-- After (build step 8): `avg frame: ____ µs`
+- After (build step 8): `avg frame: 3504 µs` (repeat runs: 3299 µs, 3291 µs)
+- Ratio: 62309 / 3504 = **17.8×** lower — AC9 needs at least 10×.
 
 | # | Plan section | Plan said | Built instead |
 | --- | --- | --- | --- |
-| D1 | | | |
+| D1 | §2.2 `View::new` + §4's AC1 command | `View::new` builds the three `PanelDocument`s; the AC1 command prints 2 | Built with one `panel_document(` call site (`.map` over the three panels) and an elided lifetime on the definition (`fn panel_document(app: &App, …) -> PanelDocument<'_>`) — three separate calls printed 3 |
+| D2 | §2.2 `draw_panel` | "draw_panels/draw_panel take `&PanelDocument` from the view and the given scroll" | `draw_panel` takes `view: &View`, reads `view.panels[panel.index()]` itself and formats its own title; the planned shape (frame, area, app, theme, panel, title, document, scroll) is 8 arguments and clippy's `too_many_arguments` fails at 8 under `-D warnings` |
+| D3 | §4 `render_large_file_timing` | "View/render 50 frames … dispatching `Scroll { down: PAGE_LINES }` between frames" | Same, and the frame mirrors `main`: the widest line is measured once and reused while `App::revision` is unchanged, so the printed number is the app's real per-frame cost after P2 |
+| D4 | §5 step 10 | "§3 Session: `App` gains `revision`; `Action::Ignored` changes nothing." | Also documented `conflict_regions` and the now-conditional `local_branch` in §3 — the file's own header says the code wins and the doc is fixed in the same change |
+| D5 | §5 precondition "008 is `done`" | Build 009 on top of 008 | 008 was `done` but its 10 files were staged and uncommitted; per the owner's choice they were committed first (`008: review bug fixes (B1-B4)`, 3403682) and 009 started on a clean tree |
 
 ---
 
@@ -486,9 +492,67 @@ Filled by the builder, one entry per deviation in §7.
 
 ```
 D1
-  Cause:
-  Evidence:
-  Why the plan missed it:
-  Fix applied:
-  Follow-up:
+  Cause: plan-gap
+  Evidence: `sed '/#\[cfg(test)\]/,$d' src/ui/mod.rs | grep -c "panel_document("`
+    printed 3 on the first step-3 build (the definition plus three calls in
+    `View::new`), against the 2 §4 requires.
+  Why the plan missed it: §2.2 says `View::new` builds the three documents and
+    §4 fixes the expected grep count separately; nothing checked that three
+    panels mean three call sites.
+  Fix applied: `View::new` builds them with
+    `.map(|panel| panel_document(app, panel))` — one call site — and
+    `panel_document` elides its lifetime so the definition itself matches
+    `panel_document(`. The command prints 2.
+  Follow-up: none.
+
+D2
+  Cause: convention-conflict
+  Evidence: `cargo clippy --all-targets -- -D warnings` failed at
+    `src/ui/mod.rs:278`: "this function has too many arguments (8/7)" for
+    `draw_panel` shaped exactly as §2.2 listed it.
+  Why the plan missed it: §2.2 enumerated `draw_panel`'s parameters without
+    running them past the lint gate architecture §2 requires on every build.
+  Fix applied: `draw_panel` takes `view: &View` instead of a document and
+    derives both its `PanelDocument` and its title from `panel`, landing at 7
+    arguments; `draw_panels` became three one-line calls.
+  Follow-up: update architecture.md §2 — done in this run: the Lint and
+    formatting line now names `clippy::too_many_arguments`' 7-argument cap as
+    part of the contract.
+
+D3
+  Cause: plan-gap
+  Evidence: §4 defined the harness as "View/render 50 frames … dispatching
+    Scroll between frames" while step 4 moved the widest-line measurement
+    behind `App::revision` in `main`; the plan never says which workload the
+    harness measures.
+  Why the plan missed it: the harness was written in step 1, before the cache
+    existed, and step 8 re-ran it without re-deciding what it times.
+  Fix applied: the harness mirrors `main`'s draw closure exactly (build view →
+    reuse `widest_cache` while the revision is unchanged → clamp → render), so
+    the baseline and the after number measure the same work.
+  Follow-up: none.
+
+D4
+  Cause: plan-gap
+  Evidence: step 10 named only `revision` and `Action::Ignored` for §3, but
+    `App` also gained the private `conflict_regions` index and `local_branch`
+    became conditional on the labels.
+  Why the plan missed it: step 10 was written per headline change, while
+    architecture.md's header requires the whole file to match the code.
+  Fix applied: §3's `App` line now lists `conflict_regions` and `revision`,
+    and `local_branch` says it resolves only when a conflict's local label
+    needs it.
+  Follow-up: none.
+
+D5
+  Cause: user-decision
+  Evidence: `git status --short` at step 0 showed 10 staged, uncommitted files
+    (008's build, 80 + 6 tests green on top of them); 009's §5 precondition is
+    "008 is `done`".
+  Why the plan missed it: the plan tracks feature-doc status, not the
+    repository's commit state.
+  Fix applied: the owner chose "Commit 008 first"; the staged work was
+    committed as `008: review bug fixes (B1-B4)` (3403682) and 009 started on
+    a clean tree.
+  Follow-up: none.
 ```
