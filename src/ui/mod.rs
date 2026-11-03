@@ -29,7 +29,7 @@ const PAGE_LINES: isize = 10;
 const SCROLL_COLUMNS: isize = 8;
 
 /// Draws the status line and the three panels from `App` state; decides nothing.
-pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
+pub fn render(frame: &mut Frame, app: &App, view: &View, scroll: (isize, usize), theme: &Theme) {
     let area = frame.area();
     let rows = Layout::new(
         LayoutDirection::Vertical,
@@ -40,7 +40,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         return;
     }
-    draw_panels(frame, area, app, theme);
+    draw_panels(frame, area, app, view, scroll, theme);
 }
 
 /// The remote, local and current panel areas inside the whole frame, below
@@ -66,13 +66,12 @@ fn panel_areas(area: Rect) -> [Rect; 3] {
 
 /// `app.scroll` clamped to the range where at least one panel still moves,
 /// so held keys never run into a dead zone past either end.
-pub fn clamp_scroll(app: &App, area: Rect) -> (isize, usize) {
+pub fn clamp_scroll(app: &App, view: &View, area: Rect) -> (isize, usize) {
     let remote = panel_areas(area)[0];
     let rows = remote.height.saturating_sub(2) as usize;
     let cols = remote.width.saturating_sub(2) as usize;
     let (mut lowest, mut highest, mut widest) = (0isize, 0isize, 0usize);
-    for panel in [Panel::Remote, Panel::Local, Panel::Current] {
-        let document = panel_document(app, panel);
+    for document in &view.panels {
         let base = document.selected_start.saturating_sub(CONTEXT_LINES) as isize;
         let max_top = document.lines.len().saturating_sub(rows) as isize;
         lowest = lowest.min(-base);
@@ -214,27 +213,18 @@ fn status_text(app: &App) -> String {
     text
 }
 
-fn draw_panels(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_panels(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    view: &View,
+    scroll: (isize, usize),
+    theme: &Theme,
+) {
     let [remote, local_area, current] = panel_areas(area);
-    let conflict = app.selected_conflict();
-    let local = branch_label_display(&conflict.local_label, app.local_branch.as_deref());
-    draw_panel(
-        frame,
-        remote,
-        app,
-        theme,
-        Panel::Remote,
-        &format!("remote: {}", conflict.remote_label),
-    );
-    draw_panel(
-        frame,
-        local_area,
-        app,
-        theme,
-        Panel::Local,
-        &format!("local: {local}"),
-    );
-    draw_panel(frame, current, app, theme, Panel::Current, "current");
+    draw_panel(frame, remote, app, theme, Panel::Remote, view, scroll);
+    draw_panel(frame, local_area, app, theme, Panel::Local, view, scroll);
+    draw_panel(frame, current, app, theme, Panel::Current, view, scroll);
 }
 
 /// Which of the three panels is being drawn.
@@ -245,7 +235,26 @@ enum Panel {
     Current,
 }
 
-fn draw_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, panel: Panel, title: &str) {
+impl Panel {
+    /// Position in `View::panels`: remote, local, current, in that order.
+    fn index(self) -> usize {
+        match self {
+            Panel::Remote => 0,
+            Panel::Local => 1,
+            Panel::Current => 2,
+        }
+    }
+}
+
+fn draw_panel(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    panel: Panel,
+    view: &View,
+    scroll: (isize, usize),
+) {
     let (border_role, title_role, border_bold) = match panel {
         Panel::Remote => (Role::Border, Role::LabelRemote, false),
         Panel::Local => (Role::Border, Role::LabelLocal, false),
@@ -255,29 +264,36 @@ fn draw_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, panel: Pa
     if border_bold {
         border_style = border_style.add_modifier(Modifier::BOLD);
     }
+    let conflict = app.selected_conflict();
+    let local = branch_label_display(&conflict.local_label, app.local_branch.as_deref());
+    let title = match panel {
+        Panel::Remote => format!("remote: {}", conflict.remote_label),
+        Panel::Local => format!("local: {local}"),
+        Panel::Current => "current".to_string(),
+    };
     let block = Block::bordered()
         .border_style(border_style)
         .title(Span::styled(
-            title.to_string(),
+            title,
             Style::default().fg(theme.get(title_role)),
         ));
 
-    let document = panel_document(app, panel);
+    let document = &view.panels[panel.index()];
     let rows = area.height.saturating_sub(2) as usize;
     let cols = area.width.saturating_sub(2) as usize;
     let mut top = panel_top(
         document.selected_start,
-        app.scroll.0,
+        scroll.0,
         document.lines.len(),
         rows,
     );
-    let mut x = app.scroll.1;
+    let mut x = scroll.1;
     // While editing, the current panel follows the caret; the other two keep
     // the shared scroll.
     let caret = if panel == Panel::Current && app.mode == Mode::Edit {
         let cursor_line = document.selected_start + app.cursor.0;
         top = follow(cursor_line, top, rows);
-        let text = document.lines.get(cursor_line).map_or("", String::as_str);
+        let text = document.lines.get(cursor_line).copied().unwrap_or("");
         let before: String = text.chars().take(app.cursor.1).collect();
         x = follow(Line::from(expand_tabs(&before)).width(), x, cols);
         Some(cursor_line)
@@ -292,7 +308,7 @@ fn draw_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, panel: Pa
         .enumerate()
         .skip(range.start)
         .take(range.len())
-        .map(|(index, text)| {
+        .map(|(index, &text)| {
             let mut style = Style::default();
             let region = document.line_region.get(index).copied().flatten();
             if region == Some(document.selected_region) {
@@ -326,56 +342,59 @@ fn draw_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, panel: Pa
     );
 }
 
+/// One frame's three panel documents: borrowed slices of the regions, so a
+/// frame splits every line once instead of copying the file three times.
+pub struct View<'a> {
+    panels: [PanelDocument<'a>; 3],
+}
+
+impl<'a> View<'a> {
+    /// Builds the remote, local and current documents once, in that order.
+    pub fn new(app: &'a App) -> View<'a> {
+        View {
+            panels: [Panel::Remote, Panel::Local, Panel::Current]
+                .map(|panel| panel_document(app, panel)),
+        }
+    }
+}
+
 /// One panel's whole document: its lines, which region owns each line, and
 /// where the selected conflict starts. Text runs are byte-identical in all
 /// three panels; only the conflict sides differ.
-struct PanelDocument {
-    lines: Vec<String>,
+struct PanelDocument<'a> {
+    lines: Vec<&'a str>,
     line_region: Vec<Option<usize>>,
     selected_region: usize,
     selected_start: usize,
 }
 
-fn panel_document(app: &App, panel: Panel) -> PanelDocument {
+fn panel_document(app: &App, panel: Panel) -> PanelDocument<'_> {
     let selected_region = app.selected_region();
-    let mut document = String::new();
-    let mut spans: Vec<(usize, usize, usize)> = Vec::new();
-    let mut newlines = 0usize;
+    let mut lines: Vec<&str> = Vec::new();
+    let mut line_region: Vec<Option<usize>> = Vec::new();
+    let mut selected_start = 0;
     for (index, region) in app.file.regions.iter().enumerate() {
-        let start = newlines;
-        let piece: &str = match region {
-            Region::Text(text) => text,
+        if index == selected_region {
+            selected_start = lines.len();
+        }
+        match region {
+            Region::Text(text) => split_lines(text, index, &mut lines, &mut line_region),
             Region::Conflict(conflict) => {
                 let side = match panel {
                     Panel::Remote => &conflict.remote_text,
                     Panel::Local => &conflict.local_text,
                     Panel::Current => &conflict.current_text,
                 };
-                // An empty side or resolution still owns one display line, so
-                // the conflict has a row to select, highlight and edit into.
-                // Display-only: `render_resolved` reads `current_text`.
-                if side.is_empty() { "\n" } else { side }
+                if side.is_empty() {
+                    // An empty side or resolution still owns one display line,
+                    // so the conflict has a row to select, highlight and edit
+                    // into. Display-only: `render_resolved` reads `current_text`.
+                    lines.push("");
+                    line_region.push(Some(index));
+                } else {
+                    split_lines(side, index, &mut lines, &mut line_region);
+                }
             }
-        };
-        newlines += piece.matches('\n').count();
-        let end = newlines + usize::from(!piece.is_empty() && !piece.ends_with('\n'));
-        document.push_str(piece);
-        spans.push((start, end, index));
-    }
-
-    let mut lines: Vec<String> = document
-        .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
-        .collect();
-    if document.ends_with('\n') {
-        lines.pop();
-    }
-    let mut line_region: Vec<Option<usize>> = vec![None; lines.len()];
-    let selected_start = spans_start(&spans, selected_region);
-    for (start, end, index) in spans {
-        let end = end.min(lines.len());
-        for slot in line_region.iter_mut().take(end).skip(start) {
-            *slot = Some(index);
         }
     }
     PanelDocument {
@@ -386,12 +405,20 @@ fn panel_document(app: &App, panel: Panel) -> PanelDocument {
     }
 }
 
-fn spans_start(spans: &[(usize, usize, usize)], region: usize) -> usize {
-    spans
-        .iter()
-        .find(|(_, _, index)| *index == region)
-        .map(|(start, _, _)| *start)
-        .unwrap_or(0)
+/// One region's text split into display lines that borrow it: each line
+/// terminator ends its line, and one `\r` before it is stripped. Every region
+/// except the last ends with `\n`, so no line ever spans two regions.
+fn split_lines<'a>(
+    text: &'a str,
+    region: usize,
+    lines: &mut Vec<&'a str>,
+    line_region: &mut Vec<Option<usize>>,
+) {
+    for raw in text.split_inclusive('\n') {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        lines.push(line.strip_suffix('\r').unwrap_or(line));
+        line_region.push(Some(region));
+    }
 }
 
 /// Tabs replaced by spaces up to the next multiple of `TAB_WIDTH`.
@@ -524,6 +551,24 @@ mod tests {
 
     const EMPTY_SIDES_MIDDLE: &str = "before\n<<<<<<< ours\n=======\n>>>>>>> theirs\nafter\n";
     const EMPTY_SIDES_AT_END: &str = "before\n<<<<<<< ours\n=======\n>>>>>>> theirs\n";
+    /// A conflict whose last text run has no terminator.
+    const NO_TRAILING_NEWLINE: &str = "a\n<<<<<<< ours\nl\n=======\nr\n>>>>>>> theirs\nz";
+
+    /// Two conflicts separated and surrounded by plain text runs; fixtures
+    /// are module-private, so this is a copy of the `app.rs` one.
+    const TWO_CONFLICTS_WITH_TEXT: &str = "before line\n\
+         <<<<<<< ours\n\
+         local a\n\
+         =======\n\
+         remote a\n\
+         >>>>>>> theirs\n\
+         between line\n\
+         <<<<<<< ours\n\
+         local b\n\
+         =======\n\
+         remote b\n\
+         >>>>>>> theirs\n\
+         after line\n";
 
     /// 70,000 plain lines and then one conflict — a file whose conflict sits
     /// far past the old `u16` vertical-scroll limit.
@@ -537,16 +582,19 @@ mod tests {
     }
 
     /// Draws one frame on an 80x24 test screen exactly the way `main` does
-    /// (clamp the scroll, then render) and returns the buffer as text — one
-    /// row per line — plus the raw buffer for cell-level checks.
+    /// (build one view, clamp the scroll, then render) and returns the buffer
+    /// as text — one row per line — plus the raw buffer for cell-level checks.
     fn screen(app: &mut App) -> (String, Buffer) {
         let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).expect("test screen");
+        let mut clamped = app.scroll;
         terminal
             .draw(|frame| {
-                app.scroll = clamp_scroll(app, frame.area());
-                render(frame, app, &theme::default_theme());
+                let view = View::new(app);
+                clamped = clamp_scroll(app, &view, frame.area());
+                render(frame, app, &view, clamped, &theme::default_theme());
             })
             .expect("draw one frame");
+        app.scroll = clamped;
         let buffer = terminal.backend().buffer().clone();
         let area = buffer.area();
         let rows: Vec<String> = (0..area.height)
@@ -565,6 +613,13 @@ mod tests {
             crate::conflict::parse(text).expect("fixture must parse"),
             None,
         )
+    }
+
+    /// The scroll clamp over a fresh view — one frame's worth of work in
+    /// `main`, with the view dropped inside so the caller can mutate `app`.
+    fn clamp(app: &App, area: Rect) -> (isize, usize) {
+        let view = View::new(app);
+        clamp_scroll(app, &view, area)
     }
 
     #[test]
@@ -691,13 +746,55 @@ mod tests {
         );
         let area = Rect::new(0, 0, 80, 24);
         app.scroll = (1000, 1000);
-        let clamped = clamp_scroll(&app, area);
+        let clamped = clamp(&app, area);
         assert!(clamped.0 < 1000 && clamped.0 > 0, "got {clamped:?}");
         assert_eq!(clamped.1, 0, "every line fits the panel width");
         app.scroll = clamped;
-        assert_eq!(clamp_scroll(&app, area), clamped, "idempotent");
+        assert_eq!(clamp(&app, area), clamped, "idempotent");
         app.scroll = (-1000, 0);
-        assert_eq!(clamp_scroll(&app, area).0, 0, "nothing above the conflict");
+        assert_eq!(clamp(&app, area).0, 0, "nothing above the conflict");
+    }
+
+    #[test]
+    fn view_lines_match_expected() {
+        let app = app_over_text(TWO_CONFLICTS_WITH_TEXT);
+        let view = View::new(&app);
+        let remote = &view.panels[Panel::Remote.index()];
+        assert_eq!(
+            remote.lines,
+            [
+                "before line",
+                "remote a",
+                "between line",
+                "remote b",
+                "after line"
+            ]
+        );
+        assert_eq!(
+            remote.line_region,
+            [Some(0), Some(1), Some(2), Some(3), Some(4)],
+            "each line belongs to its own region"
+        );
+        assert_eq!(remote.selected_start, 1, "conflict 1 starts on line 1");
+    }
+
+    #[test]
+    fn view_handles_no_trailing_newline() {
+        let app = app_over_text(NO_TRAILING_NEWLINE);
+        let view = View::new(&app);
+        let current = &view.panels[Panel::Current.index()];
+        assert_eq!(current.lines, ["a", "l", "r", "z"]);
+        assert_eq!(current.lines.last().copied(), Some("z"), "no phantom line");
+    }
+
+    #[test]
+    fn view_keeps_empty_side_placeholder() {
+        let app = app_over_text(EMPTY_SIDES_AT_END);
+        let view = View::new(&app);
+        for panel in &view.panels {
+            assert_eq!(panel.lines, ["before", ""], "the empty side owns a line");
+            assert_eq!(panel.line_region, [Some(0), Some(1)]);
+        }
     }
 
     /// `lines` text lines with a conflict after every `lines / 3` lines —
@@ -727,12 +824,15 @@ mod tests {
         let mut total = Duration::ZERO;
         for _ in 0..frames {
             let started = Instant::now();
+            let mut clamped = app.scroll;
             terminal
                 .draw(|frame| {
-                    app.scroll = clamp_scroll(&app, frame.area());
-                    render(frame, &app, &theme::default_theme());
+                    let view = View::new(&app);
+                    clamped = clamp_scroll(&app, &view, frame.area());
+                    render(frame, &app, &view, clamped, &theme::default_theme());
                 })
                 .expect("draw one frame");
+            app.scroll = clamped;
             total += started.elapsed();
             app.dispatch(Action::Scroll {
                 down: PAGE_LINES,

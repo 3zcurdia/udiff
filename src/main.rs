@@ -174,12 +174,15 @@ fn open_and_run(path: &Path, stage: bool) -> Result<i32, String> {
     let mut redraw = true;
     loop {
         if redraw {
+            let mut clamped = app.scroll;
             terminal
                 .draw(|frame| {
-                    app.scroll = ui::clamp_scroll(&app, frame.area());
-                    ui::render(frame, &app, &theme)
+                    let view = ui::View::new(&app);
+                    clamped = ui::clamp_scroll(&app, &view, frame.area());
+                    ui::render(frame, &app, &view, clamped, &theme)
                 })
                 .map_err(|error| format!("udiff: cannot draw: {error}"))?;
+            app.scroll = clamped;
             redraw = false;
         }
         let has_input = event::poll(Duration::from_secs(1))
