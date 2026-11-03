@@ -34,6 +34,9 @@ pub struct App {
     /// anchor at the selected conflict, and columns right. The shell clamps it
     /// to the panels before every draw.
     pub scroll: (isize, usize),
+    /// Bumped whenever any resolution text changes, so the shell re-measures
+    /// the widest line only then (a UI concept, kept out of this module).
+    pub revision: u64,
 }
 
 /// Single-key commands in Normal mode; free text in Edit mode.
@@ -111,6 +114,7 @@ impl App {
             local_branch,
             quit_armed: false,
             scroll: (0, 0),
+            revision: 0,
         };
         app.cursor = end_cursor(&app.selected_conflict().current_text);
         app
@@ -286,6 +290,7 @@ impl App {
         let cursor = end_cursor(&conflict.current_text);
         self.dirty = true;
         self.cursor = cursor;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Runs one text edit over the selected conflict's current text.
@@ -304,6 +309,7 @@ impl App {
         conflict.resolved = true;
         self.cursor = cursor;
         self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Moves the cursor inside the current text, bounded by its lines. A move
@@ -517,6 +523,24 @@ mod tests {
             app.selected_conflict().current_text,
             "local one\nlocal two\nremote one\nremote two\n"
         );
+    }
+
+    #[test]
+    fn revision_bumps_on_text_change_only() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        assert_eq!(app.revision, 0);
+        app.dispatch(Action::NextConflict);
+        app.dispatch(Action::Scroll { down: 2, right: 4 });
+        app.dispatch(Action::MoveCursor(Direction::Left));
+        app.dispatch(Action::EnterEdit);
+        assert_eq!(
+            app.revision, 0,
+            "navigation, scrolling and mode changes rewrite no text"
+        );
+        app.dispatch(Action::TakeLocal);
+        assert_eq!(app.revision, 1, "taking a side changes the text");
+        app.dispatch(Action::InsertChar('x'));
+        assert_eq!(app.revision, 2, "typing changes the text");
     }
 
     #[test]

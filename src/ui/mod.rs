@@ -64,21 +64,38 @@ fn panel_areas(area: Rect) -> [Rect; 3] {
     [top[0], top[1], rows[1]]
 }
 
+/// The widest display line of all three panels: the value the horizontal
+/// clamp compares against, computed once per text revision (see
+/// `App::revision`). Tabs are expanded; every other line is measured as it
+/// is drawn, which allocates nothing.
+pub fn widest_line(view: &View) -> usize {
+    view.panels
+        .iter()
+        .flat_map(|panel| panel.lines.iter().copied())
+        .map(|line| {
+            if line.contains('\t') {
+                Line::from(expand_tabs(line)).width()
+            } else {
+                Span::raw(line).width()
+            }
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// `app.scroll` clamped to the range where at least one panel still moves,
-/// so held keys never run into a dead zone past either end.
-pub fn clamp_scroll(app: &App, view: &View, area: Rect) -> (isize, usize) {
+/// so held keys never run into a dead zone past either end. `widest` is the
+/// cached `widest_line` of this frame's view.
+pub fn clamp_scroll(app: &App, view: &View, widest: usize, area: Rect) -> (isize, usize) {
     let remote = panel_areas(area)[0];
     let rows = remote.height.saturating_sub(2) as usize;
     let cols = remote.width.saturating_sub(2) as usize;
-    let (mut lowest, mut highest, mut widest) = (0isize, 0isize, 0usize);
+    let (mut lowest, mut highest) = (0isize, 0isize);
     for document in &view.panels {
         let base = document.selected_start.saturating_sub(CONTEXT_LINES) as isize;
         let max_top = document.lines.len().saturating_sub(rows) as isize;
         lowest = lowest.min(-base);
         highest = highest.max(max_top - base);
-        for line in &document.lines {
-            widest = widest.max(Line::from(expand_tabs(line)).width());
-        }
     }
     (
         app.scroll.0.clamp(lowest, highest),
@@ -554,6 +571,9 @@ mod tests {
     /// A conflict whose last text run has no terminator.
     const NO_TRAILING_NEWLINE: &str = "a\n<<<<<<< ours\nl\n=======\nr\n>>>>>>> theirs\nz";
 
+    /// One conflict whose local side starts with a real tab.
+    const TABBED_LINE: &str = "<<<<<<< ours\n\tx\n=======\nr\n>>>>>>> theirs\n";
+
     /// Two conflicts separated and surrounded by plain text runs; fixtures
     /// are module-private, so this is a copy of the `app.rs` one.
     const TWO_CONFLICTS_WITH_TEXT: &str = "before line\n\
@@ -590,7 +610,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let view = View::new(app);
-                clamped = clamp_scroll(app, &view, frame.area());
+                let widest = widest_line(&view);
+                clamped = clamp_scroll(app, &view, widest, frame.area());
                 render(frame, app, &view, clamped, &theme::default_theme());
             })
             .expect("draw one frame");
@@ -615,11 +636,22 @@ mod tests {
         )
     }
 
+    #[test]
+    fn widest_line_expands_tabs() {
+        let app = app_over_text(TABBED_LINE);
+        let view = View::new(&app);
+        assert_eq!(
+            widest_line(&view),
+            5,
+            "a tab stops at the next multiple of 4: \"    x\""
+        );
+    }
+
     /// The scroll clamp over a fresh view — one frame's worth of work in
     /// `main`, with the view dropped inside so the caller can mutate `app`.
     fn clamp(app: &App, area: Rect) -> (isize, usize) {
         let view = View::new(app);
-        clamp_scroll(app, &view, area)
+        clamp_scroll(app, &view, widest_line(&view), area)
     }
 
     #[test]
@@ -822,13 +854,17 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 40)).expect("test screen");
         let frames = 50;
         let mut total = Duration::ZERO;
+        let mut widest_cache: (Option<u64>, usize) = (None, 0);
         for _ in 0..frames {
             let started = Instant::now();
             let mut clamped = app.scroll;
             terminal
                 .draw(|frame| {
                     let view = View::new(&app);
-                    clamped = clamp_scroll(&app, &view, frame.area());
+                    if widest_cache.0 != Some(app.revision) {
+                        widest_cache = (Some(app.revision), widest_line(&view));
+                    }
+                    clamped = clamp_scroll(&app, &view, widest_cache.1, frame.area());
                     render(frame, &app, &view, clamped, &theme::default_theme());
                 })
                 .expect("draw one frame");

@@ -171,14 +171,19 @@ fn open_and_run(path: &Path, stage: bool) -> Result<i32, String> {
             .map_err(|error| format!("udiff: cannot start the terminal: {error}"))?;
 
     // Redraw on input events only, plus a theme change — never on a timer.
+    // The widest line is re-measured only when some resolution text changed.
     let mut redraw = true;
+    let mut widest_cache: (Option<u64>, usize) = (None, 0);
     loop {
         if redraw {
             let mut clamped = app.scroll;
             terminal
                 .draw(|frame| {
                     let view = ui::View::new(&app);
-                    clamped = ui::clamp_scroll(&app, &view, frame.area());
+                    if widest_cache.0 != Some(app.revision) {
+                        widest_cache = (Some(app.revision), ui::widest_line(&view));
+                    }
+                    clamped = ui::clamp_scroll(&app, &view, widest_cache.1, frame.area());
                     ui::render(frame, &app, &view, clamped, &theme)
                 })
                 .map_err(|error| format!("udiff: cannot draw: {error}"))?;
