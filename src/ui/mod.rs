@@ -461,6 +461,7 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use std::time::{Duration, Instant};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
@@ -715,5 +716,50 @@ mod tests {
         assert_eq!(clamp_scroll(&app, area), clamped, "idempotent");
         app.scroll = (-1000, 0);
         assert_eq!(clamp_scroll(&app, area).0, 0, "nothing above the conflict");
+    }
+
+    /// `lines` text lines with a conflict after every `lines / 3` lines —
+    /// a lockfile-sized file with 3 conflicts.
+    fn large_file(lines: usize) -> String {
+        let step = lines / 3;
+        let mut text = String::new();
+        for number in 0..lines {
+            text.push_str(&format!("line {number} lorem ipsum dolor\n"));
+            if step > 0 && (number + 1) % step == 0 {
+                text.push_str("<<<<<<< ours\nL\n=======\nR\n>>>>>>> theirs\n");
+            }
+        }
+        text
+    }
+
+    /// Machine-dependent: draws 50 frames of a 100,000-line file and prints
+    /// the average, so the same command before and after a change compares
+    /// frame times (feature 009 AC9). The numbers go into the feature doc.
+    #[test]
+    #[ignore]
+    fn render_large_file_timing() {
+        let text = large_file(100_000);
+        let mut app = app_over_text(&text);
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 40)).expect("test screen");
+        let frames = 50;
+        let mut total = Duration::ZERO;
+        for _ in 0..frames {
+            let started = Instant::now();
+            terminal
+                .draw(|frame| {
+                    app.scroll = clamp_scroll(&app, frame.area());
+                    render(frame, &app, &theme::default_theme());
+                })
+                .expect("draw one frame");
+            total += started.elapsed();
+            app.dispatch(Action::Scroll {
+                down: PAGE_LINES,
+                right: 0,
+            });
+        }
+        println!(
+            "avg frame: {:.0} µs",
+            total.as_micros() as f64 / frames as f64
+        );
     }
 }

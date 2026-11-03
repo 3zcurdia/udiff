@@ -7,7 +7,7 @@ From the /code-review audit of commit 21312ae (2026-11-02), findings 2, 3, 4,
 the rest of the per-frame whole-file work.
 -->
 
-**Status:** draft
+**Status:** building
 **Author:** plan agent (from the 2026-11-02 code review), approval pending (luis)
 **Date:** 2026-11-02
 **Architecture version:** commit 4fe21a7 of `.opencode/docs/architecture.md`
@@ -472,7 +472,7 @@ Precondition: 008 is `done`.
 ## 7. Deviations
 Filled by the builder. Record the timings here as well:
 
-- Baseline (build step 1): `avg frame: ____ µs` (release, 100,000 lines, 120×40)
+- Baseline (build step 1): `avg frame: 62309 µs` (release, 100,000 lines, 120×40)
 - After (build step 8): `avg frame: ____ µs`
 
 | # | Plan section | Plan said | Built instead |
