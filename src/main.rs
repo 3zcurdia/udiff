@@ -12,7 +12,7 @@ mod conflict;
 mod git;
 mod ui;
 
-use app::{App, Outcome};
+use app::{Action, App, Mode, Outcome};
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -202,21 +202,46 @@ fn open_and_run(path: &Path, stage: bool) -> Result<i32, String> {
             continue;
         }
         let event = event::read().map_err(|error| format!("udiff: input error: {error}"))?;
-        let Event::Key(key) = event else {
-            redraw = true;
-            continue;
-        };
-        match app.dispatch(ui::translate_key(key, app.mode)) {
-            Outcome::Continue => redraw = true,
-            Outcome::SaveRequested { text } => {
-                // Restore the terminal before any output so the result is
-                // readable; nothing draws after this point.
-                drop(terminal);
-                drop(_guard);
-                return save(&app.path, &text, stage);
-            }
-            Outcome::Quit => return Ok(1),
+        match step_for(&event, app.mode) {
+            Step::Skip => continue,
+            Step::Redraw => redraw = true,
+            Step::Dispatch(action) => match app.dispatch(action) {
+                Outcome::Continue => redraw = true,
+                Outcome::SaveRequested { text } => {
+                    // Restore the terminal before any output so the result is
+                    // readable; nothing draws after this point.
+                    drop(terminal);
+                    drop(_guard);
+                    return save(&app.path, &text, stage);
+                }
+                Outcome::Quit => return Ok(1),
+            },
         }
+    }
+}
+
+/// What one input event asks the shell to do with it.
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    /// Hand the event's action to `App::dispatch`.
+    Dispatch(Action),
+    /// Redraw without touching the session (a resize).
+    Redraw,
+    /// Neither: an unbound key or an event nothing observes.
+    Skip,
+}
+
+/// The event → step mapping. Only a key that maps to an action can change
+/// state, and only a resize changes the screen on its own — everything else
+/// (unbound keys, focus, mouse, paste) costs no redraw.
+fn step_for(event: &Event, mode: Mode) -> Step {
+    match event {
+        Event::Key(key) => match ui::translate_key(*key, mode) {
+            Action::Ignored => Step::Skip,
+            action => Step::Dispatch(action),
+        },
+        Event::Resize(..) => Step::Redraw,
+        _ => Step::Skip,
     }
 }
 
@@ -486,5 +511,27 @@ mod tests {
         ] {
             assert!(HELP.contains(needle), "--help mentions {needle:?}");
         }
+    }
+
+    #[test]
+    fn step_for_cases() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+        let key = |code: KeyCode| Event::Key(KeyEvent::from(code));
+        assert_eq!(
+            step_for(&key(KeyCode::F(5)), Mode::Normal),
+            Step::Skip,
+            "an unbound key draws nothing"
+        );
+        assert_eq!(
+            step_for(&key(KeyCode::Char('n')), Mode::Normal),
+            Step::Dispatch(Action::NextConflict)
+        );
+        assert_eq!(step_for(&Event::Resize(80, 24), Mode::Normal), Step::Redraw);
+        assert_eq!(
+            step_for(&Event::FocusGained, Mode::Normal),
+            Step::Skip,
+            "a focus event draws nothing"
+        );
     }
 }

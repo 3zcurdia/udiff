@@ -133,8 +133,13 @@ impl App {
     /// Applies one action. Never performs I/O: `Save` yields the rendered text
     /// for the shell to write; `Quit` asks twice when there are unsaved edits.
     pub fn dispatch(&mut self, action: Action) -> Outcome {
+        // An unbound key changes nothing at all — not even the status message
+        // — which is what lets the shell skip the redraw (feature 009).
+        if action == Action::Ignored {
+            return Outcome::Continue;
+        }
         self.message = None;
-        if action != Action::Quit && action != Action::Ignored {
+        if action != Action::Quit {
             self.quit_armed = false;
         }
         match action {
@@ -541,6 +546,38 @@ mod tests {
         assert_eq!(app.revision, 1, "taking a side changes the text");
         app.dispatch(Action::InsertChar('x'));
         assert_eq!(app.revision, 2, "typing changes the text");
+    }
+
+    #[test]
+    fn ignored_action_changes_nothing() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        app.dispatch(Action::TakeLocal);
+        app.dispatch(Action::NextConflict);
+        app.dispatch(Action::Scroll { down: 3, right: 5 });
+        app.dispatch(Action::Save); // refused: one conflict is unresolved
+        assert!(
+            app.message.is_some(),
+            "the refused save left a message to keep"
+        );
+        let message = app.message.clone();
+        let quit_armed = app.quit_armed;
+        let scroll = app.scroll;
+        let selected = app.selected;
+        let revision = app.revision;
+
+        assert_eq!(app.dispatch(Action::Ignored), Outcome::Continue);
+        assert_eq!(app.message, message, "the status message is kept");
+        assert_eq!(app.quit_armed, quit_armed);
+        assert_eq!(app.scroll, scroll);
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.revision, revision, "no text was rewritten");
+
+        app.dispatch(Action::Quit); // dirty: arms the second-q warning
+        assert!(app.quit_armed, "the warning is armed");
+        let message = app.message.clone();
+        assert_eq!(app.dispatch(Action::Ignored), Outcome::Continue);
+        assert_eq!(app.message, message, "an unbound key keeps the warning");
+        assert!(app.quit_armed, "and does not disarm it");
     }
 
     #[test]
