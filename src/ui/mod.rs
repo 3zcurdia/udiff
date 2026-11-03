@@ -5,7 +5,7 @@
 pub mod theme;
 
 use crate::app::{Action, App, Direction, Message, Mode};
-use crate::conflict::{Region, count_conflicts, count_unresolved};
+use crate::conflict::{Region, count_unresolved};
 use crate::git::branch_label_display;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -196,11 +196,7 @@ fn draw_status_line(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 fn status_text(app: &App) -> String {
     let conflict = app.selected_conflict();
     let local = branch_label_display(&conflict.local_label, app.local_branch.as_deref());
-    let mut text = format!(
-        "conflict {} of {}",
-        app.selected + 1,
-        count_conflicts(&app.file)
-    );
+    let mut text = format!("conflict {} of {}", app.selected + 1, app.conflict_count());
     let unresolved = count_unresolved(&app.file);
     if unresolved > 0 {
         text.push_str(&format!(" · {unresolved} unresolved"));
@@ -341,7 +337,7 @@ struct PanelDocument {
 }
 
 fn panel_document(app: &App, panel: Panel) -> PanelDocument {
-    let selected_region = region_of_conflict(app, app.selected);
+    let selected_region = app.selected_region();
     let mut document = String::new();
     let mut spans: Vec<(usize, usize, usize)> = Vec::new();
     let mut newlines = 0usize;
@@ -388,20 +384,6 @@ fn panel_document(app: &App, panel: Panel) -> PanelDocument {
         selected_region,
         selected_start,
     }
-}
-
-/// Region index of the `n`-th conflict, or 0 when there is none.
-fn region_of_conflict(app: &App, conflict_number: usize) -> usize {
-    let mut seen = 0;
-    for (index, region) in app.file.regions.iter().enumerate() {
-        if matches!(region, Region::Conflict(_)) {
-            if seen == conflict_number {
-                return index;
-            }
-            seen += 1;
-        }
-    }
-    0
 }
 
 fn spans_start(spans: &[(usize, usize, usize)], region: usize) -> usize {

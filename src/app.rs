@@ -4,13 +4,14 @@
 //! Pure: no terminal, no subprocess, no `std::fs`. It decides what would be
 //! saved; the shell in `src/main.rs` saves it.
 
-use crate::conflict::{
-    Conflict, ConflictFile, Region, count_conflicts, count_unresolved, render_resolved,
-};
+use crate::conflict::{Conflict, ConflictFile, Region, count_unresolved, render_resolved};
 use std::path::PathBuf;
 
 /// One editing session over one conflicted file.
 pub struct App {
+    /// Region index of each conflict, in document order. Regions never change
+    /// shape after parse, so this index is built once and never goes stale.
+    conflict_regions: Vec<usize>,
     /// The file being resolved, as given on the command line.
     pub path: PathBuf,
     /// The parsed document; only `Conflict::current_text` ever changes.
@@ -93,6 +94,13 @@ impl App {
     /// no message.
     pub fn new(path: PathBuf, file: ConflictFile, local_branch: Option<String>) -> App {
         let mut app = App {
+            conflict_regions: file
+                .regions
+                .iter()
+                .enumerate()
+                .filter(|(_, region)| matches!(region, Region::Conflict(_)))
+                .map(|(index, _)| index)
+                .collect(),
             path,
             file,
             selected: 0,
@@ -108,6 +116,16 @@ impl App {
         app
     }
 
+    /// How many conflicts the document holds — a length, never a scan.
+    pub fn conflict_count(&self) -> usize {
+        self.conflict_regions.len()
+    }
+
+    /// Region index of the selected conflict, in document order.
+    pub fn selected_region(&self) -> usize {
+        self.conflict_regions[self.selected]
+    }
+
     /// Applies one action. Never performs I/O: `Save` yields the rendered text
     /// for the shell to write; `Quit` asks twice when there are unsaved edits.
     pub fn dispatch(&mut self, action: Action) -> Outcome {
@@ -118,7 +136,7 @@ impl App {
         match action {
             Action::NextConflict => {
                 self.scroll = (0, 0);
-                if self.selected + 1 < count_conflicts(&self.file) {
+                if self.selected + 1 < self.conflict_count() {
                     self.selected += 1;
                     self.cursor = end_cursor(&self.selected_conflict().current_text);
                 }
@@ -187,25 +205,27 @@ impl App {
                 self.scroll = (0, 0);
                 Outcome::Continue
             }
-            Action::Save if count_unresolved(&self.file) > 0 => {
+            Action::Save => {
                 let unresolved = count_unresolved(&self.file);
-                self.selected = self.first_unresolved();
-                self.cursor = end_cursor(&self.selected_conflict().current_text);
-                self.message = Some(Message::Error(format!(
-                    "{unresolved} of {} conflicts unresolved",
-                    count_conflicts(&self.file)
-                )));
-                Outcome::Continue
-            }
-            Action::Save => match self.validate_save() {
-                Ok(()) => Outcome::SaveRequested {
-                    text: render_resolved(&self.file),
-                },
-                Err(text) => {
-                    self.message = Some(Message::Error(text));
-                    Outcome::Continue
+                if unresolved > 0 {
+                    self.selected = self.first_unresolved();
+                    self.cursor = end_cursor(&self.selected_conflict().current_text);
+                    self.message = Some(Message::Error(format!(
+                        "{unresolved} of {} conflicts unresolved",
+                        self.conflict_count()
+                    )));
+                    return Outcome::Continue;
                 }
-            },
+                match self.validate_save() {
+                    Ok(()) => Outcome::SaveRequested {
+                        text: render_resolved(&self.file),
+                    },
+                    Err(text) => {
+                        self.message = Some(Message::Error(text));
+                        Outcome::Continue
+                    }
+                }
+            }
             Action::Quit => {
                 if !self.dirty || self.quit_armed {
                     Outcome::Quit
@@ -252,7 +272,7 @@ impl App {
 
     /// Index of the first conflict the user has not resolved, or 0.
     fn first_unresolved(&self) -> usize {
-        (0..count_conflicts(&self.file))
+        (0..self.conflict_count())
             .find(|&index| !self.conflict_at(index).resolved)
             .unwrap_or(0)
     }
@@ -311,27 +331,18 @@ impl App {
     }
 
     fn conflict_at(&self, index: usize) -> &Conflict {
-        self.file
-            .regions
-            .iter()
-            .filter_map(|region| match region {
-                Region::Conflict(conflict) => Some(conflict),
-                Region::Text(_) => None,
-            })
-            .nth(index)
-            .expect("the zero-conflict exit guarantees at least one conflict")
+        match self.file.regions.get(self.conflict_regions[index]) {
+            Some(Region::Conflict(conflict)) => conflict,
+            _ => panic!("the zero-conflict exit guarantees at least one conflict"),
+        }
     }
 
     fn conflict_at_mut(&mut self, index: usize) -> &mut Conflict {
-        self.file
-            .regions
-            .iter_mut()
-            .filter_map(|region| match region {
-                Region::Conflict(conflict) => Some(conflict),
-                Region::Text(_) => None,
-            })
-            .nth(index)
-            .expect("the zero-conflict exit guarantees at least one conflict")
+        let region = self.conflict_regions[index];
+        match &mut self.file.regions[region] {
+            Region::Conflict(conflict) => conflict,
+            Region::Text(_) => panic!("the zero-conflict exit guarantees at least one conflict"),
+        }
     }
 }
 
@@ -506,6 +517,15 @@ mod tests {
             app.selected_conflict().current_text,
             "local one\nlocal two\nremote one\nremote two\n"
         );
+    }
+
+    #[test]
+    fn conflict_regions_match_document_order() {
+        let mut app = app_over(TWO_CONFLICTS_WITH_TEXT);
+        assert_eq!(app.conflict_count(), 2);
+        assert_eq!(app.selected_region(), 1, "region 1 holds conflict 1");
+        app.dispatch(Action::NextConflict);
+        assert_eq!(app.selected_region(), 3, "region 3 holds conflict 2");
     }
 
     #[test]
