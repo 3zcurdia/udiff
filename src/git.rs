@@ -36,18 +36,26 @@ pub fn stage(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Display label for the current side: `HEAD` or an empty marker label
-/// becomes the resolved branch name, falling back to `local`; every other
-/// marker label is shown verbatim. The remote side never goes through this.
+/// Display label for the current side: a marker label that names no branch
+/// (`HEAD` or empty) shows the resolved branch name, falling back to `local`;
+/// every other marker label is shown verbatim. The remote side never goes
+/// through this.
 pub fn branch_label_display(marker_label: &str, resolved: Option<&str>) -> String {
-    let trimmed = marker_label.trim();
-    if trimmed.is_empty() || trimmed == "HEAD" {
+    if label_needs_branch(marker_label) {
         resolved
             .map(str::to_string)
             .unwrap_or_else(|| "local".to_string())
     } else {
         marker_label.to_string()
     }
+}
+
+/// Does this marker label name no branch, so displaying it needs the resolved
+/// branch? Exactly the rule `branch_label_display` applies: the trimmed label
+/// is empty or is `HEAD`. The one question the startup git call answers.
+pub fn label_needs_branch(marker_label: &str) -> bool {
+    let trimmed = marker_label.trim();
+    trimmed.is_empty() || trimmed == "HEAD"
 }
 
 /// The argument vector of the staging call, kept pure so tests never exec.
@@ -105,7 +113,10 @@ mod tests {
         assert!(label_needs_branch("  "), "so is a blank one");
         assert!(label_needs_branch("HEAD"));
         assert!(label_needs_branch(" HEAD "), "trimmed first");
-        assert!(!label_needs_branch("ours"), "a real label is shown verbatim");
+        assert!(
+            !label_needs_branch("ours"),
+            "a real label is shown verbatim"
+        );
         assert!(!label_needs_branch("feature/x"));
         assert!(!label_needs_branch("head"), "case-sensitive, like git");
     }

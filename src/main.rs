@@ -146,8 +146,9 @@ fn finish(result: Result<i32, String>) -> ExitCode {
 }
 
 /// Reads the file (errors name the file, parse errors the line), refuses
-/// zero-conflict files, resolves the branch label, builds the session and
-/// runs it. `stage` runs `git add` after a save. Returns the process exit code.
+/// zero-conflict files, resolves the branch label when a conflict's local
+/// label names no branch, builds the session and runs it. `stage` runs
+/// `git add` after a save. Returns the process exit code.
 fn open_and_run(path: &Path, stage: bool) -> Result<i32, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("udiff: cannot read {}: {error}", path.display()))?;
@@ -161,7 +162,19 @@ fn open_and_run(path: &Path, stage: bool) -> Result<i32, String> {
     if conflict::count_conflicts(&file) == 0 {
         return Err(format!("udiff: no conflicts in {}", path.display()));
     }
-    let local_branch = git::current_branch_label();
+    // The branch is resolved only when some conflict's local label names no
+    // branch of its own — otherwise the lookup would never be shown.
+    let needs_branch = file.regions.iter().any(|region| {
+        matches!(
+            region,
+            conflict::Region::Conflict(conflict) if git::label_needs_branch(&conflict.local_label)
+        )
+    });
+    let local_branch = if needs_branch {
+        git::current_branch_label()
+    } else {
+        None
+    };
     let mut app = App::new(path.to_path_buf(), file, local_branch);
     let mut watch = OmarchyWatch::new();
     let mut theme = watch.check().unwrap_or_else(default_theme);
