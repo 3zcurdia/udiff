@@ -320,7 +320,7 @@ impl App {
     /// Moves the cursor inside the current text, bounded by its lines. A move
     /// mutates no text, so it never sets the dirty flag.
     fn move_cursor(&mut self, direction: Direction) {
-        let lines = edit_lines(&self.conflict_at(self.selected).current_text);
+        let lines = edit_line_slices(&self.conflict_at(self.selected).current_text);
         let mut cursor = self.cursor;
         clamp_cursor(&mut cursor, &lines);
         let (line, column) = cursor;
@@ -359,20 +359,29 @@ impl App {
 
 /// Cursor position at the end of a resolution's last line.
 fn end_cursor(text: &str) -> (usize, usize) {
-    let lines = edit_lines(text);
+    let lines = edit_line_slices(text);
     let last = lines.len() - 1;
     (last, lines[last].chars().count())
 }
 
-/// The editable lines of a resolution: one trailing terminator removed, then
-/// split on `\n` with any `\r` stripped. "" → [""].
-fn edit_lines(text: &str) -> Vec<String> {
+/// The editable lines of a resolution as borrowed slices: one trailing
+/// terminator removed, then split on `\n` with any `\r` stripped. "" → [""].
+/// Reading a cursor position never needs an owned copy.
+fn edit_line_slices(text: &str) -> Vec<&str> {
     let body = text
         .strip_suffix('\n')
         .map(|text| text.strip_suffix('\r').unwrap_or(text))
         .unwrap_or(text);
     body.split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect()
+}
+
+/// The same lines owned, for the edits that rewrite them.
+fn edit_lines(text: &str) -> Vec<String> {
+    edit_line_slices(text)
+        .into_iter()
+        .map(str::to_string)
         .collect()
 }
 
@@ -387,9 +396,9 @@ fn join_lines(lines: &[String], line_ending: &str) -> String {
     text
 }
 
-fn clamp_cursor(cursor: &mut (usize, usize), lines: &[String]) {
+fn clamp_cursor<S: AsRef<str>>(cursor: &mut (usize, usize), lines: &[S]) {
     cursor.0 = cursor.0.min(lines.len().saturating_sub(1));
-    cursor.1 = cursor.1.min(lines[cursor.0].chars().count());
+    cursor.1 = cursor.1.min(lines[cursor.0].as_ref().chars().count());
 }
 
 /// Byte offset of the `column`-th character (or the end of the text).

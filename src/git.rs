@@ -100,6 +100,17 @@ mod tests {
     }
 
     #[test]
+    fn label_needs_branch_cases() {
+        assert!(label_needs_branch(""), "an empty label is a branch");
+        assert!(label_needs_branch("  "), "so is a blank one");
+        assert!(label_needs_branch("HEAD"));
+        assert!(label_needs_branch(" HEAD "), "trimmed first");
+        assert!(!label_needs_branch("ours"), "a real label is shown verbatim");
+        assert!(!label_needs_branch("feature/x"));
+        assert!(!label_needs_branch("head"), "case-sensitive, like git");
+    }
+
+    #[test]
     fn stage_command_args_are_the_git_add_command() {
         let path = PathBuf::from("conflicted.txt");
         assert_eq!(
